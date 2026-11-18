@@ -1,0 +1,29 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Package plugin
+        shell: pwsh
+        run: |
+          $out = "package"
+          New-Item -ItemType Directory -Force "$out/deps" | Out-Null
+          Copy-Item target/release/uetoc.dll "$out/uetoc.wcx64"
+          Copy-Item dist/pluginst.inf, uetoc.ini $out
+          Copy-Item dist/deps/README.txt "$out/deps/"
+          (Get-Item "$out/uetoc.wcx64").Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: uetoc-wcx64
+          path: package/

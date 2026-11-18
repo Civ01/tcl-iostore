@@ -1,0 +1,6 @@
+[plugininstall]
+description=Unreal Engine IoStore containers .utoc/.ucas (read-only)
+type=wcx
+file=uetoc.wcx64
+defaultdir=uetoc
+defaultextension=ucas

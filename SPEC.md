@@ -4,22 +4,22 @@ Total Commander 11+ packer plugin (`uetoc.wcx64`) for Unreal Engine IoStore cont
 (`.utoc` + `.ucas`). Sister of [tcl-uepak](https://github.com/Civ01/tcl-uepak) (`uepak.wcx64`,
 legacy `.pak`), whose skeleton, conventions and lessons it reuses.
 
-Spec version: v0 (2026-11-18), the reading/extraction phase. Marks: **[decided]** = user decision,
+Spec version: v1 (2026-11-19), the reading/extraction phase. Marks: **[decided]** = user decision,
 **[proposed]** = my default, change it if you disagree, **[open]** = needs input or samples.
 
 ---
 
 ## 0. Status and roadmap
 
-Nothing implemented yet.
+Phase 1 is implemented (2026-11-19); TC checks by the user are open (§13).
 
 ### Phase 1: reading and extraction (current)
-| # | Milestone | Where |
-|---|---|---|
-| R1 | Container reader in the fork: partitions, block-by-block streaming, AES, clear errors, trimmed dependencies, Oodle from Civ01/repak | `Civ01/retoc` branch `tcl-iostore` |
-| R2 | Plugin skeleton (from tcl-uepak), open `.ucas`/`.utoc`, global lookup, listing, `$chunks` folder, `.utoc` info file | plugin |
-| R3 | Extract and test (hash checks), AES keys (`uetoc.keys.json`, key dialog), Oodle `deps\` | plugin |
-| R4 | Game-profile hook (vanilla profile only; see §2.2) wired through every read path | both |
+| # | Milestone | Where | Status |
+|---|---|---|---|
+| R1 | Container reader: partitions, block-by-block streaming, AES, typed errors, no panics, Oodle from Civ01/repak | `iostore` crate in `Civ01/retoc` branch `tcl-iostore` | ✅ |
+| R2 | Plugin skeleton (from tcl-uepak), open `.ucas`/`.utoc`, global lookup, listing, `$chunks` folder, `.utoc` info file | plugin | ✅ |
+| R3 | Extract and test (hash checks), AES keys (`uetoc.keys.json`, key dialog), Oodle `deps\` | plugin | ✅ |
+| R4 | Game-profile hook (vanilla profile only; see §2.2) wired through every read path | both | ✅ |
 
 ### Later goals
 - Packing: new containers, add/replace/delete, raw Zen input and legacy `.uasset/.uexp` input
@@ -75,21 +75,26 @@ project's test containers.
 ### 2.1 Layers
 ```
 uetoc.wcx64 (cdylib, this repo)
- ├─ ffi.rs       TC exports (W + ANSI), panic guard on each export (from uepak)
- ├─ open.rs      .ucas/.utoc resolution, global lookup, archive handle
- ├─ listing.rs   view model: mount-point view modes, $chunks folder, info file
- ├─ info.rs      info-file text renderer
- ├─ extract.rs   streaming extract/test, progress, cancel
- ├─ keys.rs      uetoc.keys.json + key dialog (from uepak)
- ├─ profile.rs   game profiles (§2.2)
- └─ settings/log/dialog/win/busy  (from uepak)
-retoc (Civ01/retoc, branch tcl-iostore)
- └─ container layer: TOC parse, partitions, block reader, directory index,
-    container header, Zen parsing (later: writer, conversion)
+ ├─ lib.rs       TC exports (W + ANSI), panic guard on each export (from uepak)
+ ├─ read.rs      .ucas/.utoc resolution, global check, key lookup, ReadHeader, extract/test
+ ├─ archive.rs   listing model: mount folders, files, $chunks folder, info file
+ ├─ global.rs    global container lookup (§3.2)
+ ├─ info.rs      info-file text renderer (§5)
+ ├─ profile.rs   game profile per container (§2.2)
+ ├─ keys.rs, dialog.rs   uetoc.keys.json + key dialog (from uepak)
+ └─ config.rs, view.rs, log.rs, progress.rs, win.rs, ffi.rs  (from uepak)
+iostore crate (Civ01/retoc, branch tcl-iostore, workspace member `iostore/`)
+ └─ container layer: TOC parse, partitions, streaming block reader, AES, decompression,
+    hash checks, directory index, container header summary, GameProfile
 ```
-Dependency: `retoc = { git = "https://github.com/Civ01/retoc", branch = "tcl-iostore",
-default-features = false }`. Build: `x86_64-pc-windows-gnu`, cdylib only (LTO; see the uepak
-gotcha), stripped.
+**Deviation from v0 (decided while implementing):** retoc's library uses `tracing`/`serde`
+throughout, so instead of feature-gating it the container layer is a new lean crate `iostore`
+in the fork's workspace (deps: aes, sha1, blake3, flate2, lz4_flex, zstd, thiserror,
+oodle_loader). retoc's own code is untouched and can move onto `iostore` later (writer,
+conversion). Dependency: `iostore = { git = "https://github.com/Civ01/retoc", branch =
+"tcl-iostore" }`. For local work against a checkout, a `[patch]` in a `.cargo/config.toml`
+outside the repo. Build: `x86_64-pc-windows-gnu` (mingw cross-build) or MSVC (CI), cdylib only
+(LTO; see the uepak gotcha), stripped: 0.84 MB.
 
 ### 2.2 Game profiles (hook for later custom-game support) **[proposed]**
 Every byte read from a `.utoc`/`.ucas` goes through a `GameProfile` the reader is opened with:
@@ -133,8 +138,9 @@ above it: `…\Paks\~mods\Sub\X.ucas` checks `Sub`, `~mods`, `Paks` and stops. W
 folder in the path it walks up to the limit.
 
 **Valid:** both files exist, the TOC parses, and it contains the script-objects chunk
-(`ScriptObjects` in 5.x, `LoaderGlobalMeta` + `LoaderGlobalNames` in 4.27). An encrypted global
-uses the normal key lookup.
+(`ScriptObjects` in 5.x; `LoaderInitialLoadMeta` + `LoaderGlobalNames` in 4.27, whose global
+holds types 7–9: InitialLoadMeta, GlobalNames, GlobalNameHashes). The check needs no key
+(chunk ids aren't encrypted).
 
 **Version mismatch** (global TOC version ≠ container TOC version): accepted with a warning
 **[decided]**. The warning is logged every time and shown as a popup once per
@@ -142,7 +148,7 @@ uses the normal key lookup.
 show one per container.
 
 **Not found:** warning naming the folders searched and why the search stopped (limit or `Paks`
-boundary), then the archive isn't opened (`E_UNKNOWN_FORMAT`) **[decided]**. Cached per folder
+boundary), then the archive isn't opened (`E_EABORTED`, so TC adds no second message) **[decided]**. Cached per folder
 for 10 s so TC's repeated opens don't repeat the popup **[proposed]**.
 
 In phase 1 the global is only validated and named in the info file. It's needed later for
@@ -197,7 +203,9 @@ As uepak §3.3:
 - Errors: create → `E_ECREATE`, write → `E_EWRITE`, decode/hash → `E_BAD_DATA`, missing Oodle →
   warning + `E_NOT_SUPPORTED`, key prompt cancelled → `E_EABORTED`.
 - `PK_TEST`: decode every block and check the chunk hash (SHA-1 for TOC v3, BLAKE3-160 for v5+;
-  a chunk whose hash is all zero is only decoded). Block signatures (`Signed`) are reported in the
+  a chunk whose hash is all zero is only decoded); a mismatch → `E_BAD_DATA`. Extraction
+  computes the same hash but only logs a mismatch and keeps the file (a custom game may hash
+  differently) **[proposed]**. Block signatures (`Signed`) are reported in the
   info file but not checked **[proposed]**: retoc notes they don't match a plain SHA-1 of the
   stored bytes; to be investigated with TheIsle.
 
@@ -232,23 +240,31 @@ clipboard on error, background unpack (`GetBackgroundFlags = UNPACK`) with per-h
 one key dialog at a time, popups without an owner in background threads.
 
 ## 11. Fork changes (`Civ01/retoc`, branch `tcl-iostore`; `master` untouched) **[decided]**
-1. Reader: open every partition; block-by-block read API (`ChunkReader: Read`) with progress
-   and cancel hooks; header/entry-size checks instead of asserts; typed errors
-   (`thiserror`) instead of `anyhow` at the API boundary.
-2. Dependencies: `clap`, `rayon`, `indicatif`, `jmap`, `tracing`, conversion code behind
-   features (`cli`, `convert`), so the plugin build pulls in only the container layer.
-3. Compression: `oodle_loader`/`repak` from Civ01/repak (`oodle-search-paths`), no download.
-4. Hash check helpers (SHA-1 / BLAKE3-160 by version), `FIoContainerId` and chunk-type names.
-5. `GameProfile` trait with a `Vanilla` implementation (§2.2).
-6. No panics on unexpected input (e.g. retoc panics on an unknown chunk type today).
-7. Tests against the project's test containers (kept outside the repo; path from an env var)
-   plus small synthetic containers in the repo.
+All in the new `iostore` crate (§2.1) **[done]**:
+1. Reader: every partition (`name_sN.ucas`; a missing one fails only when read), positional
+   reads (thread-safe), `ChunkReader::next_piece` (one decoded block per call) and `Read`;
+   header/entry-size/partition/block checks instead of asserts; typed errors (`thiserror`).
+2. Dependencies: only the container layer (no clap/rayon/indicatif/jmap/tracing/serde).
+3. Compression: Zlib, Gzip, LZ4, Zstd, Oodle (`oodle_loader` from Civ01/repak, no download).
+4. Hash checks (SHA-1 for TOC ≤ 3, BLAKE3-160 for ≥ 4), `ContainerId`, `Guid` (displayed as
+   the 16 bytes in file order, as tcl-uepak), chunk-type names for both numberings.
+5. `GameProfile` trait (magic, TOC preparation, decryption, compression names) + `Vanilla`.
+6. No panics on unexpected input: fuzz-style tests truncate and corrupt a TOC byte by byte
+   (they found a 66 GB allocation from a corrupted partition count, fixed).
+7. Tests: synthetic containers (all methods, versions 3/5/6/8, encryption, partitions,
+   damage) and every chunk of the sample containers (`IOSTORE_SAMPLES`, `IOSTORE_OODLE`).
+   Measured: ~1 GB/s read + Oodle + hash (warm cache); 81 MB peak while reading a 3.5 GB chunk.
 
 ## 12. Testing
-- Test containers (project files `IOStore_UEVanilla_test_containers_v2.7z`,
-  `IOStore_GameSpecific_test_containers_v1.7z`, kept outside the repo): every container lists,
-  every chunk extracts and passes its hash check, the info file renders; encrypted TheIsle with
-  its key, and a wrong key is rejected.
+- Test containers (project files `IOStore_UEVanilla_test_containers_v3.7z`,
+  `IOStore_GameSpecific_test_containers_v1.7z`, `…_UE50_v2.7z`, kept outside the repo; folder in
+  `IOSTORE_SAMPLES`, Oodle library folder in `IOSTORE_OODLE`, AES keys from `key.txt` next to a
+  container). **[done]** Plugin tests (`cargo test --release`, through open → ReadHeader →
+  ProcessFile): every sample lists every chunk exactly once, every item passes `PK_TEST`,
+  extracted files have the listed size; `.utoc` info view; mount-point views and `$chunks`;
+  global lookup rules (Paks boundary, limit, invalid global, `.ucas` without `.utoc`,
+  partition names); key dialog flow (cancel, wrong key, right key, session cache); a damaged
+  block fails `PK_TEST` but still extracts. Fork tests: see §11.
 - **Trimmed containers** (`tools/ucas_trim.py`, Python 3.9+, stdlib only): big game containers
   are uploaded with the `.utoc` unchanged and the `.ucas` zeroed except for selected chunks;
   `<name>.trim.json` lists the chunks that still hold real data. Tests list the whole container
@@ -286,5 +302,8 @@ one key dialog at a time, popups without an owner in background threads.
 - Behaviour in TC (popups, Find Files, view modes) is checked by the user, as for uepak.
 
 ## 13. Open items
+- TC checks by the user (Windows): install from the CI package, association of both `.ucas`
+  and `.utoc` (pluginst.inf can only name one: `.ucas`), listing and extraction of the
+  samples, key dialog, Oodle `deps\`, popups during Find Files, background extraction.
 - Block signature rule (TheIsle `Signed`).
 - On-demand containers: how they look on disk, if any sample turns up.
