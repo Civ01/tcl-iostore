@@ -50,7 +50,7 @@ project's test containers.
 |---|---|---|---|
 | 3 | PartitionSize | 4.27 | vanilla 4.27 (Oodle) |
 | 4 | PerfectHash | (early 5.0 previews) | none |
-| 5 | PerfectHashWithOverflow | 5.0–5.3 | vanilla 5.1, 5.3 (uncompressed) |
+| 5 | PerfectHashWithOverflow | 5.0–5.3 | vanilla 5.1, 5.2, 5.3 (uncompressed) |
 | 6 | OnDemandMetaData | 5.4 | vanilla 5.4, 5.4 AngelScript fork, G1R (Oodle) |
 | 7 | RemovedOnDemandMetaData | (unreleased) | none |
 | 8 | ReplaceIoChunkHashWithIoHash | 5.5–5.8 | vanilla 5.5–5.8; TheIsle 5.6 (encrypted, signed, Oodle) |
@@ -240,17 +240,30 @@ one key dialog at a time, popups without an owner in background threads.
 3. Compression: `oodle_loader`/`repak` from Civ01/repak (`oodle-search-paths`), no download.
 4. Hash check helpers (SHA-1 / BLAKE3-160 by version), `FIoContainerId` and chunk-type names.
 5. `GameProfile` trait with a `Vanilla` implementation (§2.2).
-6. Tests against the project's test containers (kept outside the repo; path from an env var)
+6. No panics on unexpected input (e.g. retoc panics on an unknown chunk type today).
+7. Tests against the project's test containers (kept outside the repo; path from an env var)
    plus small synthetic containers in the repo.
 
 ## 12. Testing
-- Test containers (project files `IOStore_UEVanilla_test_containers_v1.7z`,
-  `IOStore_GameSpecific_test_containers_v1.7z`): every container lists, every chunk extracts
-  and passes its hash check, the info file renders; encrypted TheIsle with its key, and a wrong
-  key is rejected.
-- Missing samples, by priority **[open]**: compressed UE5 (Oodle/Zlib/LZ4), encrypted with a
-  non-zero key GUID and encrypted 4.27, UE 5.0 and 5.2, a large container, then optional
-  segment, partitions, `.m.ubulk`/localized packages.
+- Test containers (project files `IOStore_UEVanilla_test_containers_v2.7z`,
+  `IOStore_GameSpecific_test_containers_v1.7z`, kept outside the repo): every container lists,
+  every chunk extracts and passes its hash check, the info file renders; encrypted TheIsle with
+  its key, and a wrong key is rejected.
+- **Trimmed containers** (`tools/ucas_trim.py`, Python 3.9+, stdlib only): big game containers
+  are uploaded with the `.utoc` unchanged and the `.ucas` zeroed except for selected chunks;
+  `<name>.trim.json` lists the chunks that still hold real data. Tests list the whole container
+  and extract/hash-check only the kept chunks.
+- **Oodle**: in the sandbox, tests decode Oodle blocks with the pure-Rust `oozextract` crate
+  (dev-dependency only, never in the plugin). It decoded every Oodle block of the 4.27 and G1R
+  samples with matching chunk hashes. The plugin itself uses only `deps\oo2core_N_win64.dll`;
+  real-DLL tests run on Windows (user, CI). The DLL is never committed.
+- Streaming of very large chunks (hundreds of MB) is tested with synthetic containers generated
+  in the tests, since such chunks can't be uploaded.
+- Missing samples, by priority **[open]**: one UE5 version packed with Oodle, Zlib and LZ4,
+  encrypted 4.27, encrypted with a non-zero key GUID, UE 5.0 (trimmed), a large container
+  (trimmed).
+- Backburner (user will make them with a local UE install): optional segment (`.o.utoc`),
+  partitions (`_sN.ucas`), `.m.ubulk`, localized packages.
 - Behaviour in TC (popups, Find Files, view modes) is checked by the user, as for uepak.
 
 ## 13. Open items
