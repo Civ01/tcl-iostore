@@ -48,9 +48,9 @@ project's test containers.
 
 | TOC version | Name | Engine | Test samples |
 |---|---|---|---|
-| 3 | PartitionSize | 4.27 | vanilla 4.27 (Oodle) |
+| 3 | PartitionSize | 4.27 | vanilla 4.27 (Oodle), encrypted 4.27 (Oodle; key needed) |
 | 4 | PerfectHash | (early 5.0 previews) | none |
-| 5 | PerfectHashWithOverflow | 5.0–5.3 | vanilla 5.1, 5.2, 5.3 (uncompressed) |
+| 5 | PerfectHashWithOverflow | 5.0–5.3 | VanySlash demo 5.0 (trimmed, 9157 chunks, Oodle); vanilla 5.1, 5.2, 5.3 (uncompressed) |
 | 6 | OnDemandMetaData | 5.4 | vanilla 5.4, 5.4 AngelScript fork, G1R (Oodle) |
 | 7 | RemovedOnDemandMetaData | (unreleased) | none |
 | 8 | ReplaceIoChunkHashWithIoHash | 5.5–5.8 | vanilla 5.5–5.8; TheIsle 5.6 (encrypted, signed, Oodle) |
@@ -60,8 +60,7 @@ project's test containers.
   error, not an assert.
 - Container header versions: −1 PreInitial … 5 SoftPackageReferencesOffset (5.6+).
 - **Chunk hashes** (`FIoStoreTocEntryMeta`), measured on the test containers: **SHA-1** of the
-  uncompressed chunk in 4.27; **BLAKE3 truncated to 20 bytes** in 5.1–5.8 (v5, v6, v8). 5.0 is
-  unverified (no sample) **[open]**.
+  uncompressed chunk in 4.27; **BLAKE3 truncated to 20 bytes** in 5.0–5.8 (v5, v6, v8).
 - Blocks: each block's disk size is padded to 16 bytes with `buf[(i - size) % size]` (same rule
   as pak); AES-256-ECB over the padded block when encrypted; the directory index is encrypted
   with the same key. An offset in the uncompressed address space / block size = block index; a
@@ -253,20 +252,20 @@ one key dialog at a time, popups without an owner in background threads.
   are uploaded with the `.utoc` unchanged and the `.ucas` zeroed except for selected chunks;
   `<name>.trim.json` lists the chunks that still hold real data. Tests list the whole container
   and extract/hash-check only the kept chunks.
-- **Oodle**: in the sandbox, tests decode Oodle blocks with the pure-Rust `oozextract` crate
-  (dev-dependency only, never in the plugin). It decoded every Oodle block of the 4.27 and G1R
-  samples with matching chunk hashes. The plugin itself uses only `deps\oo2core_N_win64.dll`;
-  real-DLL tests run on Windows (user, CI). The DLL is never committed.
+- **Oodle**: tests use the real library through the fork's `oodle_loader` search paths:
+  `liboo2corelinux64.so.9` in the sandbox, `oo2core_9_win64.dll` on Windows (both project
+  files, never committed; test path from an env var). The `.so` decoded every Oodle block of
+  the 4.27, G1R and 5.0 samples with matching chunk hashes.
 - Streaming of very large chunks (hundreds of MB) is tested with synthetic containers generated
   in the tests, since such chunks can't be uploaded.
-- Missing samples, by priority **[open]**: one UE5 version packed with Oodle, Zlib and LZ4,
-  encrypted 4.27, encrypted with a non-zero key GUID, UE 5.0 (trimmed), a large container
-  (trimmed).
-- Backburner (user will make them with a local UE install): optional segment (`.o.utoc`),
-  partitions (`_sN.ucas`), `.m.ubulk`, localized packages.
+- Large container: the trimmed 5.0 demo (9157 chunks, 5685 packages, 333 KB directory index,
+  1.3 GB `.ucas`) covers listing speed.
+- Missing samples **[open]**: one UE5 version (5.6–5.8) packed with Oodle, Zlib and LZ4
+  (user uploads as we go); the key for the encrypted 4.27 sample.
+- Backburner: encrypted with a non-zero key GUID; optional segment (`.o.utoc`), partitions
+  (`_sN.ucas`), `.m.ubulk`, localized packages (user will make these with a local UE install).
 - Behaviour in TC (popups, Find Files, view modes) is checked by the user, as for uepak.
 
 ## 13. Open items
-- 5.0 chunk hash algorithm (needs a 5.0 sample).
 - Block signature rule (TheIsle `Signed`).
 - On-demand containers: how they look on disk, if any sample turns up.
