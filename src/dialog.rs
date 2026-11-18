@@ -20,6 +20,10 @@ pub struct KeyPrompt<'a> {
 pub static TEST_ANSWERS: std::sync::Mutex<Vec<Option<(String, bool)>>> =
     std::sync::Mutex::new(Vec::new());
 
+/// Number of key prompts shown (tests).
+#[cfg(test)]
+pub static TEST_PROMPTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Error line of the last key prompt shown (tests).
 #[cfg(test)]
 pub static TEST_LAST_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -49,6 +53,7 @@ pub fn confirm(text: &str) -> bool {
 pub fn prompt_key(p: &KeyPrompt) -> Option<KeyAnswer> {
     #[cfg(test)]
     {
+        TEST_PROMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *TEST_LAST_ERROR.lock().unwrap() = p.error.map(String::from);
         let mut q = TEST_ANSWERS.lock().unwrap();
         if q.is_empty() {

@@ -242,9 +242,17 @@ fn encrypted_key_prompt_flow() {
     let t = tmp("keys");
     let ucas = stage(&src, &t.join("Paks"), Some(&t.join("Paks")));
     let o = Options::default();
+    // a second container with the same key in the same folder
+    let other = stage(&src.with_file_name("pakchunk2-WindowsNoEditor.utoc"), &t.join("Paks"), None);
     // no key, dialog cancelled: listing refused, info view opens with "(encrypted)"
     dialog::TEST_ANSWERS.lock().unwrap().clear();
+    read::DECLINED.lock().unwrap().clear();
+    let prompts = || dialog::TEST_PROMPTS.load(std::sync::atomic::Ordering::SeqCst);
+    let before = prompts();
     assert_eq!(read::open_archive(&ucas, &o, true).err(), Some(E_EABORTED));
+    // one cancel covers the folder (Find Files opens every container)
+    assert_eq!(read::open_archive(&other, &o, true).err(), Some(E_EABORTED));
+    assert_eq!(prompts() - before, 1);
     std::thread::sleep(std::time::Duration::from_millis(10));
     let mut arc = read::open_archive(&ucas.with_extension("utoc"), &o, true).unwrap();
     let out = t.join("info.txt");

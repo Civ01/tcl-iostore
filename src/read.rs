@@ -104,16 +104,19 @@ pub(crate) fn warn_oodle_once(container: &Path, detail: &str) {
 // AES keys (same lookup and dialog as tcl-uepak, SPEC §7)
 
 static KEY_PROMPT: Mutex<()> = Mutex::new(());
-pub(crate) static DECLINED: Mutex<Vec<(PathBuf, Instant)>> = Mutex::new(Vec::new());
+/// Cancelled key prompts by (folder, key GUID): TC opens a container several times per
+/// operation, and Find Files opens every container of a folder; one cancel covers them all
+/// for a few seconds.
+pub(crate) static DECLINED: Mutex<Vec<(PathBuf, String, Instant)>> = Mutex::new(Vec::new());
 
-fn recently_declined(p: &Path) -> bool {
+fn recently_declined(folder: &Path, guid: &str) -> bool {
     let mut d = DECLINED.lock().unwrap_or_else(|e| e.into_inner());
-    d.retain(|(_, t)| t.elapsed() < REPEAT_GRACE);
-    d.iter().any(|(x, _)| x == p)
+    d.retain(|(_, _, t)| t.elapsed() < REPEAT_GRACE);
+    d.iter().any(|(f, g, _)| f == folder && g == guid)
 }
 
-fn mark_declined(p: &Path) {
-    DECLINED.lock().unwrap_or_else(|e| e.into_inner()).push((p.to_path_buf(), Instant::now()));
+fn mark_declined(folder: &Path, guid: &str) {
+    DECLINED.lock().unwrap_or_else(|e| e.into_inner()).push((folder.to_path_buf(), guid.to_string(), Instant::now()));
 }
 
 fn save_key(folder: &Path, guid: &str, key: &keys::AesKey, persist: bool) {
@@ -179,7 +182,7 @@ pub fn resolve_key(c: &mut Container, opened: &Path) -> Result<(), KeyOutcome> {
             Err(e) => return Err(KeyOutcome::Failed(e)),
         }
     }
-    if recently_declined(&utoc) {
+    if recently_declined(&folder, &guid) {
         dlog!("  key prompt was cancelled moments ago; not asking again");
         return Err(KeyOutcome::Cancelled);
     }
@@ -187,7 +190,7 @@ pub fn resolve_key(c: &mut Container, opened: &Path) -> Result<(), KeyOutcome> {
     loop {
         let Some(answer) = dialog::prompt_key(&dialog::KeyPrompt { container: opened, guid: &guid, error: error.as_deref() }) else {
             dlog!("  key prompt cancelled");
-            mark_declined(&utoc);
+            mark_declined(&folder, &guid);
             return Err(KeyOutcome::Cancelled);
         };
         let key = match keys::AesKey::parse(&answer.text) {

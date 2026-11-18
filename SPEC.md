@@ -303,9 +303,31 @@ All in the new `iostore` crate (§2.1) **[done]**:
   (`_sN.ucas`), `.m.ubulk`, localized packages (user will make these with a local UE install).
 - Behaviour in TC (popups, Find Files, view modes) is checked by the user, as for uepak.
 
+## 12a. Observed TC behaviour (TC 11.58.1 x64 under Wine 11, 2026-11-19)
+Checked in TC itself (portable TC under WineHQ 11.0 + Xvfb in the sandbox; Ubuntu's Wine 9.0
+crashes on start there):
+- Association: `.ucas` and `.utoc` entries in `[PackerPlugins]` with caps 212; both show
+  archive icons. Listing: mount folders and `$chunks` hidden, sizes > 4 GB shown correctly,
+  `cd` into paths inside a container works.
+- Extract (F5) and TC's Test archives: 5.8 files byte-identical to retoc's unpack; all 843 G1R
+  (Oodle) files match their TOC hashes; Test archives on the encrypted 4.27 set: 31/31 hashes.
+  A 3.5 GB chunk (ARK): progress + Cancel ("User abort!" from TC, partial file deleted), then a
+  full Background extraction while browsing other containers; hash matches.
+- `.utoc` info file in Lister (F3): all sections render.
+- Key dialog: wrong key → error line, right key → listing, "session only" writes no keys file.
+- Oodle DLL removed: one warning naming `deps\`; putting the DLL back works without restarting TC.
+- **TC adds its own "Error in packed file" after any failed OpenArchive**, whatever the code
+  (13, 14, 15, 21, 22, 24 tried); OpenResult 0 with no handle shows an empty archive instead. So
+  the no-global warning (and a cancelled key prompt) is followed by TC's generic message.
+  During Find Files TC adds no message. **[open: user decision]**
+- Find Files over all samples (search inside archives): finds the files in every container. A
+  cancelled key prompt now covers the folder + key GUID for 10 s (was: per container), so one
+  prompt per folder: 3 popups instead of 5 for the sample set (no-global, 4.27, TheIsle).
+- Under Wine the ⚠ in the key dialog's error line shows as a box (font); fine on Windows.
+
 ## 13. Open items
-- TC checks by the user (Windows): install from the CI package, association of both `.ucas`
-  and `.utoc` (pluginst.inf can only name one: `.ucas`), listing and extraction of the
-  samples, key dialog, Oodle `deps\`, popups during Find Files, background extraction.
+- Short check on real Windows (§12a was done under Wine): dialog layout/fonts, install from
+  the CI package and `.utoc` association by hand (pluginst.inf names only `.ucas`).
+- Double message after a failed open (§12a): keep ours + TC's, or another approach.
 - Block signature rule (TheIsle `Signed`).
 - On-demand containers: how they look on disk, if any sample turns up.
