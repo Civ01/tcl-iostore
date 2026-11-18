@@ -178,7 +178,6 @@ dependencies = [
 [[package]]
 name = "iostore"
 version = "0.1.5"
-source = "git+https://github.com/Civ01/retoc?branch=tcl-iostore#07ee0288902b1df9918c656f110ec93a5a4097d4"
 dependencies = [
  "aes",
  "blake3",

@@ -53,7 +53,7 @@ project's test containers.
 | 5 | PerfectHashWithOverflow | 5.0–5.3 | VanySlash demo 5.0 (trimmed, 9157 chunks, Oodle); vanilla 5.1, 5.2, 5.3 (uncompressed) |
 | 6 | OnDemandMetaData | 5.4 | vanilla 5.4, 5.4 AngelScript fork, G1R (Oodle) |
 | 7 | RemovedOnDemandMetaData | (unreleased) | none |
-| 8 | ReplaceIoChunkHashWithIoHash | 5.5–5.8 | vanilla 5.5–5.8; TheIsle 5.6 (encrypted, signed, Oodle) |
+| 8 | ReplaceIoChunkHashWithIoHash | 5.5–5.8 | vanilla 5.5–5.8; 5.8 compressed with Zlib, Gzip, LZ4; TheIsle 5.6 (encrypted, signed, Oodle) |
 | 9, 10 | AddedSourceHashes, ContainerEncryptionMethod | after 5.8.4 | none; refused with "TOC version N is newer than this plugin supports" |
 
 - Header 0x90 bytes, magic `-==--==--==--==-`. A header-size or block-entry-size mismatch is an
@@ -295,8 +295,10 @@ All in the new `iostore` crate (§2.1) **[done]**:
   and an 8.3 MB directory index (listing speed), `pakchunk10` has a 3.5 GB chunk (streaming,
   memory, progress, Cancel). As of manifest 6268348989345964786 (2026-11-18) every chunk of
   pakchunk0/10/11 and global passes its hash check. Also: the trimmed 5.0 demo (9157 chunks).
-- Missing samples **[open]**: one UE5 version (5.6–5.8) packed with Oodle, Zlib and LZ4
-  (user uploads as we go).
+- Compressed UE5 (`IOStore_UEVanilla58_test_containers_COMPRESSED.7z`): 5.8 with Zlib, Gzip
+  and LZ4 pass. Its `Zstd` folder holds Zlib data (byte-identical to the `zlib` set): UE 5.8's
+  packer seems to fall back to Zlib for Zstd, so no real Zstd sample exists yet (Zstd is covered
+  by the synthetic tests only). Oodle on UE5 is covered by G1R, the 5.0 demo and TheIsle.
 - Backburner: encrypted with a non-zero key GUID; optional segment (`.o.utoc`), partitions
   (`_sN.ucas`), `.m.ubulk`, localized packages (user will make these with a local UE install).
 - Behaviour in TC (popups, Find Files, view modes) is checked by the user, as for uepak.
