@@ -141,10 +141,23 @@ fn utoc_opens_as_info_file() {
         assert!(text.contains(section), "{section}");
     }
     assert!(text.starts_with('\u{feff}'));
-    assert!(text.contains("Mount point\t../../../Moadra/Content/Mods/DebugInfo/\r\n"));
-    assert!(text.contains("Version\t5 SoftPackageReferencesOffset"));
-    let rows = text.lines().skip_while(|l| !l.starts_with("Path\t")).skip(1).count();
-    assert_eq!(rows, arc.container.chunk_count() as usize);
+    // fixed-width: no tabs, values in one column, table rows after the "---" line
+    assert!(!text.contains('\t'));
+    let value_col = |key: &str| text.lines().find(|l| l.starts_with(key)).map(|l| l[key.len()..].find(|c: char| c != ' ').unwrap() + key.len()).unwrap();
+    assert_eq!(value_col("Mount point"), value_col("Version"));
+    assert_eq!(value_col("Folder"), value_col("Chunks without perfect hash"));
+    assert!(text.lines().any(|l| l.starts_with("Mount point") && l.ends_with("../../../Moadra/Content/Mods/DebugInfo/")));
+    assert!(text.lines().any(|l| l.starts_with("Version") && l.ends_with("5 SoftPackageReferencesOffset")));
+    let mut table = text.lines().skip_while(|l| !l.trim_start().starts_with("#  Type"));
+    let head = table.next().unwrap();
+    let path_col = head.find("Path").unwrap();
+    let rows: Vec<&str> = table.skip(1).take_while(|l| !l.is_empty()).collect();
+    let chunk_rows = text.lines().skip_while(|l| !l.trim_start().starts_with("#  Chunk id")).skip(2).count();
+    assert_eq!(chunk_rows, arc.container.chunk_count() as usize);
+    assert!(text.lines().all(|l| l.chars().count() <= 120 || l.contains("/") || l.contains("\\")), "only lines with paths may be long");
+    assert_eq!(rows.len(), arc.container.chunk_count() as usize);
+    // every row's path starts in the Path column (all other columns are padded)
+    assert!(rows.iter().all(|r| r.len() > path_col && r.as_bytes()[path_col - 1] == b' ' && r.as_bytes()[path_col] != b' '), "{rows:?}");
     assert_eq!(items[0].unpack as usize, std::fs::metadata(&out).unwrap().len() as usize);
     // OpenUtocAsVirtualFile=0: like the .ucas
     let o = Options { open_utoc_as_virtual_file: false, ..Options::default() };

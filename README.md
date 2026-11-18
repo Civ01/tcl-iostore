@@ -11,7 +11,7 @@ decisions: [SPEC.md](SPEC.md).
   Chunks without a path (container header, script objects, …) are in a hidden `$chunks`
   folder. Extract and test (chunk hashes) work on everything.
 - **`.utoc`**: shows one text file, `<ContainerId>.txt`, describing the header, container
-  header, signatures and every chunk (tab-separated, pastes into a spreadsheet). Set
+  header, signatures and every chunk (fixed-width tables for Lister's monospace font). Set
   `OpenUtocAsVirtualFile=0` to open `.utoc` files like the `.ucas`.
 - A valid `global.utoc` + `global.ucas` must be in the container's folder or a parent folder
   (not above `Paks`).

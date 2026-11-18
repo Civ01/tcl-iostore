@@ -175,25 +175,25 @@ conversion and Zen-aware packing.
 - No AES key needed unless the directory index is encrypted (`Encrypted` flag); then the key
   is asked on open.
 
-## 5. Info file (`<ContainerId>.txt`) **[decided]**, layout **[proposed]**
+## 5. Info file (`<ContainerId>.txt`) **[decided]**
 Generated in memory on open; UTF-8 with BOM, CRLF; listed with its real size and the `.utoc`
-date; extract/F3 gives the text. Sections:
+date; extract/F3 gives the text.
 
-```
-[Container]   file names (utoc, ucas + partitions), sizes, companion .pak present yes/no,
-              global used (path, TOC version, match/mismatch)
-[Header]      every header field: magic, version (number + name), header size, entry count,
-              block count + entry size, compression method names, block size, directory
-              index size, partition count/size, container id (dec + hex), key GUID, flags,
-              perfect-hash seed count, chunks without perfect hash
-[ContainerHeader]  version, package count, localized packages, redirects (if parsed)
-[Signatures]  present yes/no, hash size (not verified: needs the game's public key)
-[Files]       one line per chunk, directory-index order then unnamed chunks:
-              path | chunk id | type | offset | size | packed | blocks | compression | flags (Compressed, MemoryMapped) | hash
-```
-Columns tab-separated so the text pastes into a spreadsheet. If the directory index is
-encrypted and no key is available, the `[Files]` paths read `(encrypted)` and the file still
-opens **[proposed]**.
+**Layout: fixed-width, for a monospace font** (Lister's default) **[decided 2026-11-19]**,
+replacing the earlier tab-separated layout:
+- Sections `[Container]`, `[Header]`, `[ContainerHeader]`, `[Signatures]`, `[Files]`.
+- Key/value lines: keys padded to one column width per file (`Key ......... value` style
+  without dots: `Key` + spaces), values start in the same column in every section.
+- Two tables, each with a header row + a separator row of `-`, columns padded with spaces to
+  the widest value, numbers right-aligned (with `,` thousands separators), text left-aligned.
+  Same rows in both (directory-index order, then unnamed chunks), linked by `#` (TOC entry
+  index). Two narrow tables instead of one ~170-character table, because Lister wraps long
+  lines by default:
+  - `[Files]`: #, type, size, packed, compression, path (last, so long paths push nothing).
+  - `[Chunks]`: #, chunk id, partition, offset in the data file, blocks, flags, hash.
+- Only ASCII outside paths (no box-drawing characters), so any font/codepage lines up.
+- If the directory index is encrypted and no key is available, paths read `(encrypted)` and
+  the file still opens.
 
 ## 6. Extraction and testing
 
