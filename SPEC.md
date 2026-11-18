@@ -48,7 +48,7 @@ project's test containers.
 
 | TOC version | Name | Engine | Test samples |
 |---|---|---|---|
-| 3 | PartitionSize | 4.27 | vanilla 4.27 (Oodle), encrypted 4.27 (Oodle; key needed) |
+| 3 | PartitionSize | 4.27 | vanilla 4.27 (Oodle), encrypted 4.27 (Oodle; base64 key) |
 | 4 | PerfectHash | (early 5.0 previews) | none |
 | 5 | PerfectHashWithOverflow | 5.0–5.3 | VanySlash demo 5.0 (trimmed, 9157 chunks, Oodle); vanilla 5.1, 5.2, 5.3 (uncompressed) |
 | 6 | OnDemandMetaData | 5.4 | vanilla 5.4, 5.4 AngelScript fork, G1R (Oodle) |
@@ -63,7 +63,8 @@ project's test containers.
   uncompressed chunk in 4.27; **BLAKE3 truncated to 20 bytes** in 5.0–5.8 (v5, v6, v8).
 - Blocks: each block's disk size is padded to 16 bytes with `buf[(i - size) % size]` (same rule
   as pak); AES-256-ECB over the padded block when encrypted; the directory index is encrypted
-  with the same key. An offset in the uncompressed address space / block size = block index; a
+  with the same key. Blocks stored without compression are encrypted too (verified on the
+  encrypted 4.27 sample). An offset in the uncompressed address space / block size = block index; a
   block offset / `PartitionSize` = partition index (`name.ucas`, `name_s1.ucas`, …).
 - A container is mounted through the `.pak` of the same name; the optional segment is `.o.utoc`.
 
@@ -256,12 +257,13 @@ one key dialog at a time, popups without an owner in background threads.
   `liboo2corelinux64.so.9` in the sandbox, `oo2core_9_win64.dll` on Windows (both project
   files, never committed; test path from an env var). The `.so` decoded every Oodle block of
   the 4.27, G1R and 5.0 samples with matching chunk hashes.
-- Streaming of very large chunks (hundreds of MB) is tested with synthetic containers generated
-  in the tests, since such chunks can't be uploaded.
+- Streaming of very large chunks (hundreds of MB to several GB) is tested with synthetic
+  containers generated in the tests (real Oodle compression via the `.so`), since such chunks
+  can't be uploaded.
 - Large container: the trimmed 5.0 demo (9157 chunks, 5685 packages, 333 KB directory index,
   1.3 GB `.ucas`) covers listing speed.
 - Missing samples **[open]**: one UE5 version (5.6–5.8) packed with Oodle, Zlib and LZ4
-  (user uploads as we go); the key for the encrypted 4.27 sample.
+  (user uploads as we go).
 - Backburner: encrypted with a non-zero key GUID; optional segment (`.o.utoc`), partitions
   (`_sN.ucas`), `.m.ubulk`, localized packages (user will make these with a local UE install).
 - Behaviour in TC (popups, Find Files, view modes) is checked by the user, as for uepak.
