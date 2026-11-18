@@ -1,0 +1,3 @@
+TheIsle/Content/Paks/global.utoc
+TheIsle/Content/Paks/global.ucas
+regex:^TheIsle/Content/Paks/pakchunk\d+-WindowsServer\.(utoc|ucas|sig)$

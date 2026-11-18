@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Downloads the large real-world IoStore test set: ARK: Survival Ascended Dedicated
+# Optional large set (chunks > 2 GB): ARK: Survival Ascended Dedicated
 # Server (Steam app 2430930, depot 2430931), anonymous Steam login, no credentials.
 # Only the files in ark_filelist.txt (~3.5 GB): global, every .utoc, and the .ucas of
 #   pakchunk0  (162,944 chunks, 8.3 MB directory index: listing speed)

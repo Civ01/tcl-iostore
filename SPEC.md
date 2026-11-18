@@ -259,6 +259,20 @@ one key dialog at a time, popups without an owner in background threads.
   the 4.27, G1R and 5.0 samples with matching chunk hashes.
 - Synthetic containers generated in the tests cover what the real sets don't (chunks > 4 GB,
   odd block sizes); real Oodle compression via the `.so`.
+- Large containers, real data, fetched with anonymous Steam login (DepotDownloader, never
+  uploaded):
+  - **Default:** The Isle Dedicated Server, branch `evrima` (`tools/fetch_isle_server.sh`,
+    ~1 GB): TOC v8, Oodle, encrypted + signed (same key as the TheIsle sample). pakchunk2 has
+    36,575 chunks and a 2 MB directory index, pakchunk1 an 836 MB chunk. Every chunk of
+    pakchunk2 passes its hash check (manifest 3189305585142138513).
+  - **Only for chunks > 2 GB:** ARK: Survival Ascended Dedicated Server
+    (`tools/fetch_ark_server.sh`, ~3.5 GB): pakchunk0 has 162,944 chunks, pakchunk10 a 3.5 GB
+    chunk; all chunks pass (manifest 6268348989345964786).
+- **Performance checks run only when needed** **[decided]**: when code that lists or reads
+  containers changes in a way that could affect speed or memory, not on every change or
+  release. Normal test runs use the small samples.
+- Synthetic containers generated in the tests cover what the real sets don't (chunks > 4 GB,
+  odd block sizes); real Oodle compression via the `.so`.
 - Large containers, real data: ARK: Survival Ascended Dedicated Server (UE 5.x, TOC v8, Oodle),
   downloaded with anonymous Steam login by `tools/fetch_ark_server.sh` (DepotDownloader,
   file list `tools/ark_filelist.txt`, ~3.5 GB, never uploaded): `pakchunk0` has 162,944 chunks
