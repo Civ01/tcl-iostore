@@ -257,11 +257,14 @@ one key dialog at a time, popups without an owner in background threads.
   `liboo2corelinux64.so.9` in the sandbox, `oo2core_9_win64.dll` on Windows (both project
   files, never committed; test path from an env var). The `.so` decoded every Oodle block of
   the 4.27, G1R and 5.0 samples with matching chunk hashes.
-- Streaming of very large chunks (hundreds of MB to several GB) is tested with synthetic
-  containers generated in the tests (real Oodle compression via the `.so`), since such chunks
-  can't be uploaded.
-- Large container: the trimmed 5.0 demo (9157 chunks, 5685 packages, 333 KB directory index,
-  1.3 GB `.ucas`) covers listing speed.
+- Synthetic containers generated in the tests cover what the real sets don't (chunks > 4 GB,
+  odd block sizes); real Oodle compression via the `.so`.
+- Large containers, real data: ARK: Survival Ascended Dedicated Server (UE 5.x, TOC v8, Oodle),
+  downloaded with anonymous Steam login by `tools/fetch_ark_server.sh` (DepotDownloader,
+  file list `tools/ark_filelist.txt`, ~3.5 GB, never uploaded): `pakchunk0` has 162,944 chunks
+  and an 8.3 MB directory index (listing speed), `pakchunk10` has a 3.5 GB chunk (streaming,
+  memory, progress, Cancel). As of manifest 6268348989345964786 (2026-11-18) every chunk of
+  pakchunk0/10/11 and global passes its hash check. Also: the trimmed 5.0 demo (9157 chunks).
 - Missing samples **[open]**: one UE5 version (5.6–5.8) packed with Oodle, Zlib and LZ4
   (user uploads as we go).
 - Backburner: encrypted with a non-zero key GUID; optional segment (`.o.utoc`), partitions

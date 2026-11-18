@@ -1,0 +1,6 @@
+ShooterGame/Content/Paks/global.utoc
+ShooterGame/Content/Paks/global.ucas
+regex:^ShooterGame/Content/Paks/pakchunk\d+-WindowsServer\.utoc$
+ShooterGame/Content/Paks/pakchunk0-WindowsServer.ucas
+ShooterGame/Content/Paks/pakchunk10-WindowsServer.ucas
+ShooterGame/Content/Paks/pakchunk11-WindowsServer.ucas
