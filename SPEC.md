@@ -4,16 +4,17 @@ Total Commander 11+ packer plugin (`uetoc.wcx64`) for Unreal Engine IoStore cont
 (`.utoc` + `.ucas`). Sister of [tcl-uepak](https://github.com/Civ01/tcl-uepak) (`uepak.wcx64`,
 legacy `.pak`), whose skeleton, conventions and lessons it reuses.
 
-Spec version: v1 (2026-11-19), the reading/extraction phase. Marks: **[decided]** = user decision,
+Spec version: v2 (2026-11-19): phase 1 (reading/extraction) done; next goals in §0. Marks: **[decided]** = user decision,
 **[proposed]** = my default, change it if you disagree, **[open]** = needs input or samples.
 
 ---
 
 ## 0. Status and roadmap
 
-Phase 1 is implemented (2026-11-19); TC checks by the user are open (§13).
+Phase 1 is implemented and checked in TC 11.58 under Wine (2026-11-19, §12a); a short check on
+real Windows is open (§13).
 
-### Phase 1: reading and extraction (current)
+### Phase 1: reading and extraction (done)
 | # | Milestone | Where | Status |
 |---|---|---|---|
 | R1 | Container reader: partitions, block-by-block streaming, AES, typed errors, no panics, Oodle from Civ01/repak | `iostore` crate in `Civ01/retoc` branch `tcl-iostore` | ✅ |
@@ -21,14 +22,18 @@ Phase 1 is implemented (2026-11-19); TC checks by the user are open (§13).
 | R3 | Extract and test (hash checks), AES keys (`uetoc.keys.json`, key dialog), Oodle `deps\` | plugin | ✅ |
 | R4 | Game-profile hook (vanilla profile only; see §2.2) wired through every read path | both | ✅ |
 
-### Later goals
-- Packing: new containers, add/replace/delete, raw Zen input and legacy `.uasset/.uexp` input
-  (auto-detected, else ask once per copy session) **[decided]**, companion `.pak` written by repak.
-- Custom game support based on CUE4Parse's game-specific code (keys, custom encryption, block
-  layouts, header magics), picked via a game profile, probably prompted on a read failure **[decided]**.
-- TOC v9 `AddedSourceHashes` / v10 `ContainerEncryptionMethod` (AES-CTR) once a released engine
-  writes them (in CUE4Parse; not in UE 5.8.4).
-- Optional legacy conversion on extract (retoc `to-legacy`).
+### Next goals (candidates, to be ordered with the user)
+| # | Goal | Scope | Size | Notes |
+|---|---|---|---|---|
+| N1 | **Packing, raw** | New container from raw Zen files (what we extract), add/replace/delete in existing containers; writer in `iostore` (blocks, compression with levels, padding, perfect hash, container header rebuilt from the Zen package headers); companion `.pak` via the repak fork; `PK_CAPS_NEW/MODIFY/DELETE`; settings dialog | large | Raw round-trip first: extracted files → container that loads in the game. Same undo/compact ideas as uepak (TOC is small: rewrite it, append to `.ucas`). Open questions: version/engine selection, encryption on write, signed containers |
+| N2 | **Packing, legacy input** | Legacy `.uasset/.uexp/.ubulk` converted to Zen on pack (retoc `to-zen`), auto-detected, else asked once per copy session **[decided]** | large | Needs the global's script objects (already mandatory) and an engine version for the target |
+| N3 | **Legacy conversion on extract** | Optional: extract Zen packages as legacy `.uasset/.uexp` (retoc `to-legacy`) | medium | Needs global + often other containers; retoc's code exists |
+| N4 | **Custom game support** | Game profiles ported from CUE4Parse (keys, custom encryption, block layouts, magics); per-folder profile, offered on a read failure **[decided]** | medium per game | Hook in place (§2.2); needs the user's game-specific samples |
+| N5 | **TOC v9/v10** | `AddedSourceHashes`, `ContainerEncryptionMethod` (AES-CTR) | small | When a released engine writes them; CUE4Parse reads them |
+| N6 | **uepak follow-ups** | Port the per-folder key-prompt grace (Find Files) to tcl-uepak; recheck its dialogs in TC under Wine | small | |
+
+Proposed order **[proposed]**: N6 (quick) → N1 → N2 → N3, with N4/N5 when samples or a new engine
+appear. N1 starts with its own spec round (decisions listed in N1's notes).
 
 ### Non-goals (phase 1)
 - Writing anything. Packing operations return `E_NOT_SUPPORTED` and the capabilities don't
@@ -148,7 +153,9 @@ holds types 7–9: InitialLoadMeta, GlobalNames, GlobalNameHashes). The check ne
 show one per container.
 
 **Not found:** warning naming the folders searched and why the search stopped (limit or `Paks`
-boundary), then the archive isn't opened (`E_EABORTED`, so TC adds no second message) **[decided]**. Cached per folder
+boundary), then the archive isn't opened (`E_EABORTED`) **[decided]**. TC then adds its own
+"Error in packed file" (it does for any failed open, §12a); keeping both messages
+**[decided 2026-11-19]**. Cached per folder
 for 10 s so TC's repeated opens don't repeat the popup **[proposed]**.
 
 In phase 1 the global is only validated and named in the info file. It's needed later for
@@ -319,15 +326,16 @@ crashes on start there):
 - **TC adds its own "Error in packed file" after any failed OpenArchive**, whatever the code
   (13, 14, 15, 21, 22, 24 tried); OpenResult 0 with no handle shows an empty archive instead. So
   the no-global warning (and a cancelled key prompt) is followed by TC's generic message.
-  During Find Files TC adds no message. **[open: user decision]**
+  During Find Files TC adds no message. Keeping both messages **[decided 2026-11-19]**.
 - Find Files over all samples (search inside archives): finds the files in every container. A
   cancelled key prompt now covers the folder + key GUID for 10 s (was: per container), so one
   prompt per folder: 3 popups instead of 5 for the sample set (no-global, 4.27, TheIsle).
 - Under Wine the ⚠ in the key dialog's error line shows as a box (font); fine on Windows.
+- Info file in Lister: fixed-width layout lines up (§5); Lister's wrap (key `W`) wraps at about
+  75 characters, so the wide `[Chunks]` rows wrap until wrapping is switched off.
 
 ## 13. Open items
 - Short check on real Windows (§12a was done under Wine): dialog layout/fonts, install from
   the CI package and `.utoc` association by hand (pluginst.inf names only `.ucas`).
-- Double message after a failed open (§12a): keep ours + TC's, or another approach.
 - Block signature rule (TheIsle `Signed`).
 - On-demand containers: how they look on disk, if any sample turns up.
