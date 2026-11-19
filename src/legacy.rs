@@ -157,7 +157,8 @@ pub const VERSIONS: &[(EngineVersion, &str, &str)] = &[
     (EngineVersion::UE5_4, "UE5_4", "UE 5.4"),
     (EngineVersion::UE5_5, "UE5_5", "UE 5.5"),
     (EngineVersion::UE5_6, "UE5_6", "UE 5.6"),
-    (EngineVersion::UE5_7, "UE5_7", "UE 5.7 / 5.8"),
+    (EngineVersion::UE5_7, "UE5_7", "UE 5.7"),
+    (EngineVersion::UE5_8, "UE5_8", "UE 5.8"),
 ];
 
 pub fn version_ini_name(v: EngineVersion) -> &'static str {
@@ -175,13 +176,29 @@ pub fn parse_version(s: &str) -> Result<Option<EngineVersion>, ()> {
         return Ok(None);
     }
     let n = n.strip_prefix("UE").unwrap_or(&n);
-    let n = if n == "58" { "57" } else { n };
     VERSIONS.iter().find(|x| x.1.replace('_', "").strip_prefix("UE") == Some(n)).map(|x| Some(x.0)).ok_or(())
 }
 
 /// Engine versions that write this TOC + container-header version.
 pub fn candidates(toc: EIoStoreTocVersion, header: Option<EIoContainerHeaderVersion>) -> Vec<EngineVersion> {
     VERSIONS.iter().map(|x| x.0).filter(|v| v.toc_version() == toc && Some(v.container_header_version()) == header).collect()
+}
+
+/// Narrows the candidates with the shader hash size seen in the container headers (8 bytes
+/// only from UE 5.8 on), then drops 5.8 when 5.7 is still in: packages are the same in both
+/// (object version 1018), so the pick can't change the output.
+pub fn refine(cands: Vec<EngineVersion>, shader_hash_size: Option<usize>) -> Vec<EngineVersion> {
+    let mut c = cands;
+    if let Some(size) = shader_hash_size {
+        let fit: Vec<_> = c.iter().copied().filter(|v| v.shader_hash_size() == size).collect();
+        if !fit.is_empty() {
+            c = fit;
+        }
+    }
+    if c.contains(&EngineVersion::UE5_7) {
+        c.retain(|v| *v != EngineVersion::UE5_8);
+    }
+    c
 }
 
 /// retoc's heuristic picks one version by itself (5.1/5.2 are told apart per package).
@@ -245,6 +262,8 @@ struct Store {
     backend: Box<dyn IoStoreTrait>,
     toc: EIoStoreTocVersion,
     header: Option<EIoContainerHeaderVersion>,
+    /// Shader map hash size in the package store entries (`None`: no package has shader maps).
+    shader_hash_size: Option<usize>,
 }
 
 static STORE: Mutex<Option<Arc<Store>>> = Mutex::new(None);
@@ -330,7 +349,9 @@ fn build_store(global: &Path, current: &Path) -> Result<Store, String> {
     let n = list.len();
     let backend = retoc::iostore::backend_from_containers(list).map_err(|e| format!("{e:#}"))?;
     dlog!("  legacy store: {n} containers ({skipped} skipped) under {} in {} ms", root.display(), started.elapsed().as_millis());
-    Ok(Store { global: global.to_path_buf(), fingerprint: fp, backend, toc, header })
+    let shader_hash_size = backend.packages().find_map(|p| p.container().package_store_entry(p.id()).and_then(|e| e.shader_map_hashes.first().map(|h| h.len())));
+    dlog!("  legacy store: shader hash size {shader_hash_size:?}");
+    Ok(Store { global: global.to_path_buf(), fingerprint: fp, backend, toc, header, shader_hash_size })
 }
 
 fn store_for(global: &Path, current: &Path) -> Result<Arc<Store>, String> {
@@ -456,7 +477,7 @@ impl Session {
         if let Decision::Use(v) = self.decision {
             return Ok(v);
         }
-        let cands = candidates(self.store.toc, self.store.header);
+        let cands = refine(candidates(self.store.toc, self.store.header), self.store.shader_hash_size);
         if let Some(d) = decide_quietly(ini, &self.utoc, &cands, self.store.header) {
             self.decision = d;
             let Decision::Use(v) = d else { unreachable!() };
@@ -466,7 +487,7 @@ impl Session {
             // versioned packages don't need it; decide when an unversioned one comes
             return Ok(None);
         }
-        let v = ask(&self.utoc, &cands, ini)?;
+        let v = ask(&self.utoc, &cands, ini, self.store.shader_hash_size.is_none())?;
         self.decision = Decision::Use(Some(v));
         Ok(Some(v))
     }
@@ -534,7 +555,8 @@ fn has_versioning_info(c: &Container, chunk: u32) -> bool {
     }
 }
 
-fn ask(utoc: &Path, cands: &[EngineVersion], ini: Option<EngineVersion>) -> Result<EngineVersion, LegacyError> {
+/// `merged_58`: no shader hashes seen, so "5.7" stands for 5.7 and 5.8 (same packages).
+fn ask(utoc: &Path, cands: &[EngineVersion], ini: Option<EngineVersion>, merged_58: bool) -> Result<EngineVersion, LegacyError> {
     let _one = PROMPT.lock().unwrap_or_else(|e| e.into_inner());
     // another thread may have picked meanwhile
     if let Some((u, v)) = SESSION_PICK.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
@@ -543,8 +565,12 @@ fn ask(utoc: &Path, cands: &[EngineVersion], ini: Option<EngineVersion>) -> Resu
         }
     }
     let list: Vec<EngineVersion> = if cands.is_empty() { VERSIONS.iter().map(|x| x.0).collect() } else { cands.to_vec() };
-    let selected = ini.and_then(|v| list.iter().position(|x| *x == v)).unwrap_or(list.len() - 1);
-    let labels: Vec<&str> = list.iter().map(|v| version_label(*v)).collect();
+    let ini_in_list = ini.map(|v| if merged_58 && v == EngineVersion::UE5_8 && !list.contains(&v) { EngineVersion::UE5_7 } else { v });
+    let selected = ini_in_list.and_then(|v| list.iter().position(|x| *x == v)).unwrap_or(list.len() - 1);
+    let labels: Vec<&str> = list
+        .iter()
+        .map(|v| if merged_58 && *v == EngineVersion::UE5_7 && !list.contains(&EngineVersion::UE5_8) { "UE 5.7 / 5.8" } else { version_label(*v) })
+        .collect();
     dlog!("  legacy: asking for the engine version ({labels:?})");
     let Some(a) = dialog::prompt_version(&dialog::VersionPrompt { container: utoc, choices: &labels, selected, known: !cands.is_empty() }) else {
         dlog!("  legacy: version prompt cancelled");
@@ -573,7 +599,8 @@ mod tests {
         assert_eq!(parse_version("Auto"), Ok(None));
         assert_eq!(parse_version(""), Ok(None));
         assert_eq!(parse_version("UE5_7"), Ok(Some(EngineVersion::UE5_7)));
-        assert_eq!(parse_version("5.8"), Ok(Some(EngineVersion::UE5_7)));
+        assert_eq!(parse_version("5.8"), Ok(Some(EngineVersion::UE5_8)));
+        assert_eq!(parse_version("UE5_8"), Ok(Some(EngineVersion::UE5_8)));
         assert_eq!(parse_version("ue4.27"), Ok(Some(EngineVersion::UE4_27)));
         assert!(parse_version("UE6").is_err());
         use EIoContainerHeaderVersion as H;
@@ -582,8 +609,17 @@ mod tests {
         assert!(heuristic_suffices(&candidates(T::PerfectHashWithOverflow, Some(H::OptionalSegmentPackages))));
         assert_eq!(candidates(T::OnDemandMetaData, Some(H::NoExportInfo)), [EngineVersion::UE5_4]);
         let late = candidates(T::ReplaceIoChunkHashWithIoHash, Some(H::SoftPackageReferencesOffset));
-        assert_eq!(late, [EngineVersion::UE5_6, EngineVersion::UE5_7]);
-        assert!(!heuristic_suffices(&late));
+        assert_eq!(late, [EngineVersion::UE5_6, EngineVersion::UE5_7, EngineVersion::UE5_8]);
+        // no shader maps: 5.7 stands for 5.8 too (same packages)
+        assert_eq!(refine(late.clone(), None), [EngineVersion::UE5_6, EngineVersion::UE5_7]);
+        assert!(!heuristic_suffices(&refine(late.clone(), None)));
+        // 8-byte shader hashes: 5.8, no prompt
+        assert_eq!(refine(late.clone(), Some(8)), [EngineVersion::UE5_8]);
+        assert!(heuristic_suffices(&refine(late.clone(), Some(8))));
+        // 20-byte: 5.6 or 5.7
+        assert_eq!(refine(late, Some(20)), [EngineVersion::UE5_6, EngineVersion::UE5_7]);
+        // older engines are unaffected
+        assert_eq!(refine(candidates(T::OnDemandMetaData, Some(H::NoExportInfo)), Some(20)), [EngineVersion::UE5_4]);
     }
 
     #[test]

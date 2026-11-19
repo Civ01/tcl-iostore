@@ -385,7 +385,8 @@ fn legacy_view_converts_samples() {
         }
         total += n;
         failed += bad;
-        eprintln!("{:<75} {n} legacy files, {bad} failed", utoc.strip_prefix(&root).unwrap().display());
+        let asked = dialog::TEST_VERSION_PROMPTS.lock().unwrap().len();
+        eprintln!("{:<75} {n} legacy files, {bad} failed, {asked} version prompts", utoc.strip_prefix(&root).unwrap().display());
     }
     eprintln!("legacy: {total} files, {failed} failed, {compared} compared with retoc, {differ} differ");
     assert_eq!(failed, 0);

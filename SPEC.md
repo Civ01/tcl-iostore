@@ -27,7 +27,7 @@ real Windows is open (§13).
 |---|---|---|---|---|
 | N1 | **Packing, raw** | New container from raw Zen files (what we extract), add/replace/delete in existing containers; writer in `iostore` (blocks, compression with levels, padding, perfect hash, container header rebuilt from the Zen package headers); `PK_CAPS_NEW/MODIFY/DELETE`; settings dialog | large | Raw round-trip first: extracted files → container that loads in the game. Same undo/compact ideas as uepak (TOC is small: rewrite it, append to `.ucas`). **No repak/`.pak` writing in this plugin** **[decided 2026-11-19]**: after creating a container from scratch, warn that the game only mounts it together with a same-named `.pak` (make it with uepak), warning switchable off in the ini (`WarnPakNeeded=1`). Merging both plugins is a maybe, much later. Open questions: version/engine selection, encryption on write, signed containers |
 | N2 | **Packing, legacy input** | Legacy `.uasset/.uexp/.ubulk` converted to Zen on pack (retoc `to-zen`), auto-detected, else asked once per copy session **[decided]** | large | Needs the global's script objects (already mandatory) and an engine version for the target |
-| N3 | **Legacy conversion on extract** | Hidden `$legacy` folder: Zen packages as legacy `.uasset/.uexp/.ubulk…`, rebuilt shader libraries, `scriptobjects.bin` (retoc `to-legacy`) | medium | Done for UE 4.27–5.7 and 5.8 without shaders. **N3b open: UE 5.8 shader hashes** (§6a.1) |
+| N3 | **Legacy conversion on extract** | Hidden `$legacy` folder: Zen packages as legacy `.uasset/.uexp/.ubulk…`, rebuilt shader libraries, `scriptobjects.bin` (retoc `to-legacy`) | medium | Done, incl. N3b (UE 5.8 shader hashes, §6a.1) |
 | N4 | **Custom game support** | Game profiles ported from CUE4Parse (keys, custom encryption, block layouts, magics); per-folder profile, offered on a read failure **[decided]** | medium per game | Hook in place (§2.2); needs the user's game-specific samples |
 | N5 | **TOC v9/v10** | `AddedSourceHashes`, `ContainerEncryptionMethod` (AES-CTR) | small | When a released engine writes them; CUE4Parse reads them |
 | N6 | **uepak follow-ups** | Port the per-folder key-prompt grace (Find Files) to tcl-uepak; recheck its dialogs in TC under Wine | small | |
@@ -249,7 +249,8 @@ Shader asset info is built as retoc does, over all loaded containers: package st
 say which packages use the library, and only those packages are read.
 
 **Engine version** **[decided]**: `[Options] LegacyEngineVersion=Auto` (or `UE4_27`, `UE5_0` …
-`UE5_7`; 5.8 packages use `UE5_7`, same object version 1018).
+`UE5_8`). 5.7 and 5.8 packages are the same (object version 1018); 5.8 differs only in shader
+hashes (§6a.1), which are detected, so the version never changes shader output.
 - `Auto`: derived from the TOC + container-header versions (retoc's heuristics, 5.1/5.2 told
   apart per package by bulk data). Unique for 4.27, 5.0, 5.1/5.2, 5.3, 5.4, 5.5.
 - The heuristic **fails** when it gives no version (unknown combination) or several (container
@@ -291,7 +292,29 @@ IoStore-library version change (CUE4Parse keys it on `GAME_UE5_8`). It affects:
   8-byte hashes;
 - the shader asset info JSON (hash strings).
 
-Plan **[proposed]**:
+**Done (2026-11-19)** — plan as below, all steps carried out:
+- retoc fork 7346193: `FShaderHash` (8 or 20 bytes) everywhere shader hashes live; size detected
+  from the store-entry buffer (exact) and from the IoStore library header (the size that parses
+  the chunk exactly); legacy library v3 for 8-byte hashes; asset info `AssetInfoVersion: 2`;
+  `EngineVersion::UE5_8`; to-zen of v3 libraries refuses for now (5.8 shader group ids are
+  xxHash128 over the hashes, N2).
+- Plugin: `UE5_8` in the ini/prompt. Candidates are narrowed by the shader hash size found in the
+  loaded containers' store entries: 8 bytes ⇒ 5.8, no prompt; 20 bytes ⇒ 5.6 or 5.7; none (e.g.
+  server builds) ⇒ 5.6 or "UE 5.7 / 5.8" (one entry, same packages).
+- Results on the sample: no prompt; shader libraries **same content as the engine's** (both the
+  cook's `ShaderLibrarySource` and the `.pak`: 301 maps / 3,767 shaders and 4 / 36, code
+  identical after decompression; `tools/shaderlib_compare.py`); `.uexp` byte-identical to the
+  `.pak`; `.uasset` equivalent but not byte-identical (retoc can't restore the saved package hash,
+  name hashes, name/import order: Zen drops them; same for all versions); asset info lists only
+  packages present in the containers (engine also lists plugin materials and global "None"
+  entries). Earlier samples unchanged (byte-identical to the previous references).
+- TC check (N3b only): F5 of `$legacy` from the sample, no prompt, log shows hash size 8;
+  files identical to the sandbox run except the Global library (34 bytes smaller: the Windows
+  Oodle DLL compresses a few shaders differently from the Linux build; same content).
+- Side finding for uepak: the sample `.pak` says Zlib, but its entries are gzip streams
+  (`1f 8b`); repak unpacked them still compressed. To check in tcl-uepak.
+
+Plan:
 1. Sample: add `global.utoc/.ucas` of the IoStore build (required; missing from the upload);
    optionally `Saved\Cooked\Windows\Moadra\Metadata\ShaderLibrarySource\ShaderAssetInfo-*.assetinfo.json`
    (not staged into the `.pak`) as reference for the asset info.
@@ -333,7 +356,7 @@ GlobalParentLookupLimit=5   ; parent levels searched for global.utoc (Paks bound
 MountPoint=Folder           ; Folder | Root
 MountFolderAttr=Hidden
 VirtualFolderAttr=Hidden    ; attribute of $chunks and $legacy
-LegacyEngineVersion=Auto    ; Auto | UE4_27 | UE5_0 … UE5_7 (§6a)
+LegacyEngineVersion=Auto    ; Auto | UE4_27 | UE5_0 … UE5_8 (§6a)
 WarnPakNeeded=1             ; N1: warn after creating a container from scratch
 DebugLog=0
 ```
