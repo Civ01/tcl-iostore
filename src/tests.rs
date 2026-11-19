@@ -13,7 +13,7 @@ use std::sync::Mutex;
 /// Tests share statics (session keys, dialog answers): run them one at a time.
 static SERIAL: Mutex<()> = Mutex::new(());
 
-fn lock() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn lock() -> std::sync::MutexGuard<'static, ()> {
     SERIAL.lock().unwrap_or_else(|e| e.into_inner())
 }
 

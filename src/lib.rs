@@ -9,6 +9,7 @@
 #![allow(non_snake_case, clippy::missing_safety_doc)]
 
 pub mod archive;
+pub mod busy;
 pub mod config;
 pub mod dialog;
 pub mod ffi;
@@ -17,6 +18,7 @@ pub mod info;
 pub mod keys;
 pub mod legacy;
 pub mod log;
+pub mod pack;
 pub mod profile;
 mod progress;
 pub mod read;
@@ -25,6 +27,8 @@ pub mod win;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod pack_tests;
 
 use archive::Archive;
 use ffi::*;
@@ -237,17 +241,102 @@ pub extern "system" fn SetChangeVolProcW(_h: Handle, _proc: ChangeVolProcW) {}
 #[unsafe(no_mangle)]
 pub extern "system" fn GetPackerCaps() -> c_int {
     // TC caches caps: the plugin must be reinstalled after a change here.
-    // Read-only in phase 1: no NEW / MODIFY / DELETE.
-    PK_CAPS_MULTIPLE | PK_CAPS_OPTIONS | PK_CAPS_BY_CONTENT | PK_CAPS_SEARCHTEXT
+    PK_CAPS_NEW | PK_CAPS_MODIFY | PK_CAPS_DELETE | PK_CAPS_MULTIPLE | PK_CAPS_OPTIONS | PK_CAPS_BY_CONTENT | PK_CAPS_SEARCHTEXT
 }
 
 pub const BACKGROUND_UNPACK: c_int = 1;
+pub const BACKGROUND_PACK: c_int = 2;
 
-/// Unpacking is thread-safe: per-handle state, per-thread progress callbacks, locked
-/// shared state, one key dialog at a time.
+/// Unpacking and packing are thread-safe: per-handle state, per-thread progress callbacks,
+/// locked shared state, one key dialog at a time, a busy guard per container being written.
 #[unsafe(no_mangle)]
 pub extern "system" fn GetBackgroundFlags() -> c_int {
-    BACKGROUND_UNPACK
+    BACKGROUND_UNPACK | BACKGROUND_PACK
+}
+
+fn describe_list(items: &[String]) -> String {
+    items.iter().enumerate().map(|(i, s)| format!("  [{i}] {s:?}")).collect::<Vec<_>>().join("\n")
+}
+
+/// Logs and shows a packing error; returns the TC code.
+fn report_pack_error(packed: &Path, e: pack::PackError, outcome: &str) -> c_int {
+    match e {
+        pack::PackError::Aborted => {
+            dlog!("  -> cancelled");
+            E_EABORTED
+        }
+        pack::PackError::User(msg) => {
+            dlog!("  -> refused: {msg}");
+            show_warning(&msg);
+            E_EABORTED
+        }
+        pack::PackError::Failed(msg) => {
+            dlog!("  -> failed: {msg}");
+            // Our message is more precise than TC's generic one: show it and keep TC quiet.
+            show_error(&format!("{}\n\nThe operation failed: {msg}\n{outcome}", packed.display()));
+            E_EABORTED
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn PackFilesW(packed_file: *const u16, sub_path: *const u16, src_path: *const u16, add_list: *const u16, flags: c_int) -> c_int {
+    guard(E_NOT_SUPPORTED, "PackFilesW", || {
+        init();
+        let options = reload_options();
+        let packed = unsafe { win::from_wide_ptr(packed_file) };
+        let sub = unsafe { win::from_wide_ptr(sub_path) };
+        let src = unsafe { win::from_wide_ptr(src_path) };
+        let items = unsafe { win::from_wide_multi(add_list) };
+        dlog!("PackFiles {packed:?} sub={sub:?} src={src:?} flags={flags}\n{}", describe_list(&items));
+        let (Some(packed), Some(src)) = (packed, src) else {
+            return E_ECREATE;
+        };
+        let packed = PathBuf::from(packed);
+        let started = std::time::Instant::now();
+        match pack::pack_files(&packed, sub.as_deref(), Path::new(&src), &items, flags, &options) {
+            Ok(st) => {
+                dlog!(
+                    "  -> OK in {} ms: {} replaced, {} added, {} bytes{}{}{}",
+                    started.elapsed().as_millis(),
+                    st.replaced,
+                    st.added,
+                    st.input_bytes,
+                    if st.new_container { ", new container" } else { "" },
+                    if st.compacted { ", rebuilt" } else { "" },
+                    st.pak_written.as_ref().map(|p| format!(", wrote {}", p.display())).unwrap_or_default()
+                );
+                if flags & pack::PK_PACK_MOVE_FILES != 0 {
+                    let srcs: Vec<PathBuf> = items.iter().filter(|i| !i.ends_with('\\')).map(|i| Path::new(&src).join(i.replace(['\\', '/'], std::path::MAIN_SEPARATOR_STR))).collect();
+                    pack::delete_sources(&srcs);
+                }
+                0
+            }
+            Err(e) => report_pack_error(&packed, e, "The container was left unchanged."),
+        }
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "system" fn DeleteFilesW(packed_file: *const u16, delete_list: *const u16) -> c_int {
+    guard(E_NOT_SUPPORTED, "DeleteFilesW", || {
+        init();
+        let options = reload_options();
+        let items = unsafe { win::from_wide_multi(delete_list) };
+        let Some(packed) = (unsafe { win::from_wide_ptr(packed_file) }) else {
+            return E_EOPEN;
+        };
+        let packed = PathBuf::from(packed);
+        dlog!("DeleteFiles {}\n{}", packed.display(), describe_list(&items));
+        let started = std::time::Instant::now();
+        match pack::delete_files(&packed, &items, &options) {
+            Ok(st) => {
+                dlog!("  -> OK in {} ms: {} removed{}", started.elapsed().as_millis(), st.removed, if st.compacted { ", rebuilt" } else { "" });
+                0
+            }
+            Err(e) => report_pack_error(&packed, e, "The container was left unchanged."),
+        }
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -258,7 +347,7 @@ pub extern "system" fn ConfigurePacker(_parent: *mut c_void, _dll_instance: *mut
         let keys = config::settings_dir().map(|d| d.join(keys::KEYS_NAME));
         let show = |p: Option<PathBuf>| p.map(|p| p.display().to_string()).unwrap_or_else(|| "(plugin folder not found)".into());
         win::info(&format!(
-            "UE IoStore plugin {} (read-only).\n\nOptions are set in:\n{}\n\nRemembered AES keys:\n{}\n\nOodle library folder:\n{}",
+            "UE IoStore plugin {}.\n\nOptions (also packing: [Pack] section) are set in:\n{}\n\nRemembered AES keys:\n{}\n\nOodle library folder:\n{}",
             env!("CARGO_PKG_VERSION"),
             show(ini),
             show(keys),
@@ -358,6 +447,20 @@ pub extern "system" fn SetProcessDataProc(_h: Handle, _proc: ProcessDataProcA) {
 
 #[unsafe(no_mangle)]
 pub extern "system" fn SetChangeVolProc(_h: Handle, _proc: ChangeVolProcA) {}
+
+/// TC needs the ANSI entry points to exist before it offers packing; TC x64 then calls the
+/// Unicode ones (as tcl-uepak).
+#[unsafe(no_mangle)]
+pub extern "system" fn PackFiles(_packed_file: *const c_char, _sub_path: *const c_char, _src_path: *const c_char, _add_list: *const c_char, _flags: c_int) -> c_int {
+    dlog!("PackFiles (ANSI) called; only the Unicode version is supported");
+    E_NOT_SUPPORTED
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn DeleteFiles(_packed_file: *const c_char, _delete_list: *const c_char) -> c_int {
+    dlog!("DeleteFiles (ANSI) called; only the Unicode version is supported");
+    E_NOT_SUPPORTED
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn CanYouHandleThisFile(name: *const c_char) -> c_int {

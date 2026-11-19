@@ -251,6 +251,9 @@ pub fn open_archive(path: &Path, options: &config::Options, list_mode: bool) -> 
     };
     dlog!("  utoc {} view={view:?}", utoc.display());
     crate::legacy::note_opened(&utoc);
+    if !list_mode || view == View::Listing {
+        crate::pack::check_pending_undo(&utoc);
+    }
 
     let started = Instant::now();
     let mut c = Container::open(&utoc, crate::profile::profile_for(&utoc)).map_err(|e| {

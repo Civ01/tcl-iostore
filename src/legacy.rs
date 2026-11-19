@@ -293,7 +293,7 @@ struct Store {
 
 static STORE: Mutex<Option<Arc<Store>>> = Mutex::new(None);
 
-fn find_utocs(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
+pub(crate) fn find_utocs(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
     if depth > 16 {
         return;
     }

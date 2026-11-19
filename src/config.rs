@@ -24,6 +24,79 @@ pub const ATTR_HIDDEN: u32 = 0x2;
 pub const ATTR_SYSTEM: u32 = 0x4;
 
 pub const DEFAULT_GLOBAL_LOOKUP_LIMIT: u32 = 5;
+
+/// `[Pack] PackMode` (SPEC §6b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PackMode {
+    /// Every file must exist in the game; its chunk ID and store entry are reused.
+    #[default]
+    ReplaceOnly,
+    /// N1b (not implemented yet): behaves as ReplaceOnly.
+    ReplaceWithAddition,
+}
+
+/// `[Pack] Compression`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PackCompression {
+    /// The container's own method (new containers: the game's most used one).
+    #[default]
+    Match,
+    None,
+    Zlib,
+    Gzip,
+    Lz4,
+    Oodle,
+}
+
+/// `[Pack]` options.
+#[derive(Debug, Clone)]
+pub struct PackOptions {
+    pub mode: PackMode,
+    pub compression: PackCompression,
+    /// Zlib/gzip level 0–9.
+    pub zlib_level: u32,
+    pub oodle_compressor: iostore::write::OodleCompressor,
+    pub oodle_level: iostore::write::OodleLevel,
+    /// New containers: write an empty companion `.pak` (if none exists).
+    pub write_empty_pak: bool,
+    /// New containers without a `.pak`: warn that one is needed.
+    pub warn_pak_needed: bool,
+    /// Always rebuild after a change (drops dead space).
+    pub compact: bool,
+    /// Rebuild containers smaller than this after a change (0 = never).
+    pub auto_compact_under: u64,
+    /// New containers: `Auto` (UE: common root of the files) or a mount point.
+    pub new_mount_point: Option<String>,
+}
+
+impl Default for PackOptions {
+    fn default() -> Self {
+        PackOptions {
+            mode: PackMode::default(),
+            compression: PackCompression::default(),
+            zlib_level: 6,
+            oodle_compressor: iostore::write::OodleCompressor::Kraken,
+            oodle_level: iostore::write::OodleLevel::Normal,
+            write_empty_pak: true,
+            warn_pak_needed: true,
+            compact: false,
+            auto_compact_under: 10 << 20,
+            new_mount_point: None,
+        }
+    }
+}
+
+/// `10M`, `512K`, `1G`, plain bytes.
+pub fn parse_size(v: &str) -> Option<u64> {
+    let v = v.trim();
+    let (num, mul) = match v.chars().last().map(|c| c.to_ascii_uppercase()) {
+        Some('K') => (&v[..v.len() - 1], 1u64 << 10),
+        Some('M') => (&v[..v.len() - 1], 1 << 20),
+        Some('G') => (&v[..v.len() - 1], 1 << 30),
+        _ => (v, 1),
+    };
+    num.trim().parse::<u64>().ok().and_then(|n| n.checked_mul(mul))
+}
 pub const MAX_GLOBAL_LOOKUP_LIMIT: u32 = 64;
 
 #[derive(Debug, Clone)]
@@ -42,6 +115,8 @@ pub struct Options {
     /// `LegacyGuessScriptTypes`: name engine structs/enums in `$legacy` imports by a name guess
     /// instead of `Object` (a wrong guess makes the legacy loader fail that import).
     pub legacy_guess_script_types: bool,
+    /// `[Pack]` section.
+    pub pack: PackOptions,
     /// Problems found while parsing (logged; invalid values keep defaults).
     pub warnings: Vec<String>,
 }
@@ -57,6 +132,7 @@ impl Default for Options {
             debug_log: false,
             legacy_engine_version: None,
             legacy_guess_script_types: false,
+            pack: PackOptions::default(),
             warnings: vec![],
         }
     }
@@ -227,12 +303,16 @@ pub fn parse_options(text: &str) -> Options {
             Some(i) if i > 0 && value[..i].ends_with([' ', '\t']) => &value[..i],
             _ => value,
         };
-        if section != "options" {
-            continue;
-        }
         // Keys are case-insensitive and ignore '_' (DebugLog == debug_log).
         let key = key.trim().to_ascii_lowercase().replace('_', "");
         let raw = value.trim();
+        if section == "pack" {
+            parse_pack_option(&mut opts, &key, raw);
+            continue;
+        }
+        if section != "options" {
+            continue;
+        }
         let mut bad = |k: &str| opts.warnings.push(format!("[Options] {k}={raw}: invalid, default kept"));
         match key.as_str() {
             "openutocasvirtualfile" => match parse_bool(raw) {
@@ -263,6 +343,78 @@ pub fn parse_options(text: &str) -> Options {
     opts
 }
 
+fn parse_pack_option(opts: &mut Options, key: &str, raw: &str) {
+    use iostore::write::{OodleCompressor as C, OodleLevel as L};
+    let lower = raw.to_ascii_lowercase();
+    let p = &mut opts.pack;
+    let ok = match key {
+        "packmode" => match lower.as_str() {
+            "replaceonly" => {
+                p.mode = PackMode::ReplaceOnly;
+                true
+            }
+            "replacewithaddition" => {
+                p.mode = PackMode::ReplaceWithAddition;
+                true
+            }
+            _ => false,
+        },
+        "compression" => {
+            let c = match lower.as_str() {
+                "match" | "auto" => Some(PackCompression::Match),
+                "none" | "store" => Some(PackCompression::None),
+                "zlib" => Some(PackCompression::Zlib),
+                "gzip" => Some(PackCompression::Gzip),
+                "lz4" => Some(PackCompression::Lz4),
+                "oodle" => Some(PackCompression::Oodle),
+                _ => None,
+            };
+            c.map(|c| p.compression = c).is_some()
+        }
+        "zliblevel" => lower.parse::<u32>().ok().filter(|l| *l <= 9).map(|l| p.zlib_level = l).is_some(),
+        "oodlecompressor" => {
+            let c = match lower.as_str() {
+                "kraken" => Some(C::Kraken),
+                "mermaid" => Some(C::Mermaid),
+                "selkie" => Some(C::Selkie),
+                "leviathan" => Some(C::Leviathan),
+                _ => None,
+            };
+            c.map(|c| p.oodle_compressor = c).is_some()
+        }
+        "oodlelevel" => {
+            let l = match lower.as_str() {
+                "superfast" | "1" => Some(L::SuperFast),
+                "veryfast" | "2" => Some(L::VeryFast),
+                "fast" | "3" => Some(L::Fast),
+                "normal" | "4" => Some(L::Normal),
+                "optimal1" | "5" => Some(L::Optimal1),
+                "optimal2" | "6" => Some(L::Optimal2),
+                "optimal3" | "7" => Some(L::Optimal3),
+                "optimal4" | "8" => Some(L::Optimal4),
+                "optimal5" | "9" => Some(L::Optimal5),
+                _ => None,
+            };
+            l.map(|l| p.oodle_level = l).is_some()
+        }
+        "writeemptypak" => parse_bool(raw).map(|b| p.write_empty_pak = b).is_some(),
+        "warnpakneeded" => parse_bool(raw).map(|b| p.warn_pak_needed = b).is_some(),
+        "compact" => parse_bool(raw).map(|b| p.compact = b).is_some(),
+        "autocompactunder" => parse_size(raw).map(|n| p.auto_compact_under = n).is_some(),
+        "newmountpoint" | "mountpoint" => {
+            p.new_mount_point = match lower.as_str() {
+                "" | "auto" => None,
+                _ => Some(raw.replace('\\', "/")),
+            };
+            true
+        }
+        _ => true,
+    };
+    if !ok {
+        opts.warnings.push(format!("[Pack] {key}={raw}: invalid, default kept"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,6 +442,16 @@ mod tests {
         assert_eq!(parse_options("[Options]\nLegacyEngineVersion=Auto").legacy_engine_version, None);
         assert!(!parse_options("[Options]").legacy_guess_script_types);
         assert!(parse_options("[Options]\nLegacyGuessScriptTypes=1").legacy_guess_script_types);
+        let p = parse_options("[Pack]\nPackMode=ReplaceWithAddition\nCompression=Oodle ; c\nOodleLevel=Optimal2\nWriteEmptyPak=0\nAutoCompactUnder=2M\nNewMountPoint=..\\..\\..\\Game\\").pack;
+        assert_eq!(p.mode, PackMode::ReplaceWithAddition);
+        assert_eq!(p.compression, PackCompression::Oodle);
+        assert_eq!(p.oodle_level, iostore::write::OodleLevel::Optimal2);
+        assert!(!p.write_empty_pak && p.warn_pak_needed);
+        assert_eq!(p.auto_compact_under, 2 << 20);
+        assert_eq!(p.new_mount_point.as_deref(), Some("../../../Game/"));
+        let d = parse_options("").pack;
+        assert_eq!((d.mode, d.compression, d.auto_compact_under), (PackMode::ReplaceOnly, PackCompression::Match, 10 << 20));
+        assert_eq!(parse_options("[Pack]\nCompression=Zstd").warnings.len(), 1);
     }
 
     #[test]

@@ -1,7 +1,8 @@
 # tcl-iostore — UE IoStore packer plugin for Total Commander
 
 `uetoc.wcx64`: a Total Commander 11+ (x64) packer plugin that browses, extracts and tests
-Unreal Engine IoStore containers (`.utoc` + `.ucas`), UE 4.27 – 5.8. Read-only for now.
+Unreal Engine IoStore containers (`.utoc` + `.ucas`), UE 4.27 – 5.8, and patches them with
+raw Zen files (replace, delete, new patch containers).
 Sister of [tcl-uepak](https://github.com/Civ01/tcl-uepak) (legacy `.pak`). Design and
 decisions: [SPEC.md](SPEC.md).
 
@@ -23,6 +24,14 @@ decisions: [SPEC.md](SPEC.md).
   `OpenUtocAsVirtualFile=0` to open `.utoc` files like the `.ucas`.
 - A valid `global.utoc` + `global.ucas` must be in the container's folder or a parent folder
   (not above `Paks`).
+- **Packing** (F5/Alt+F5 onto a container, F8 inside one): raw Zen files as the plugin extracts
+  them. Every file must already exist in the game (any container under the global's folder):
+  its chunk ID, path and store entry are reused and only the data is replaced. Anything else
+  (new files, `.ini`/`.locres` and other companion-pak files, legacy cooked `.uasset`+`.uexp`)
+  cancels the whole copy with one message. A new container takes TOC version, block size and
+  compression from the game and gets an empty companion `.pak` (`WriteEmptyPak`). Changes are
+  appended with an undo record (restored on the next open after a crash); small containers are
+  rebuilt (`AutoCompactUnder`). Settings: `[Pack]` in `uetoc.ini`.
 - Encrypted containers: AES key dialog; keys are remembered in `uetoc.keys.json`.
 - Compression: Zlib, Gzip, LZ4, Zstd built in; Oodle with `deps\oo2core_N_win64.dll`
   (copy it from the game).

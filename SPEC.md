@@ -25,7 +25,7 @@ real Windows is open (§13).
 ### Next goals (candidates, to be ordered with the user)
 | # | Goal | Scope | Size | Notes |
 |---|---|---|---|---|
-| N1 | **Packing, raw** | Raw Zen files into containers: replace/delete in existing containers, new patch containers from game files; writer in `iostore` | large | **Spec'd 2026-11-19, §6b.** Replace-only first; **N1b (highest backburner): replace with addition** (new packages) |
+| N1 | **Packing, raw** | Raw Zen files into containers: replace/delete in existing containers, new patch containers from game files; writer in `iostore` | large | **Done 2026-11-19 (§6b)**, ini only (Configure dialog open). **N1b (highest backburner): replace with addition** (new packages) |
 | N2 | **Packing, legacy input** | Legacy `.uasset/.uexp/.ubulk` converted to Zen on pack (retoc `to-zen`), auto-detected, else asked once per copy session **[decided]** | large | Needs the global's script objects (already mandatory) and an engine version for the target; Zen header-size field per version (§6a.2) |
 | N3 | **Legacy conversion on extract** | Hidden `$legacy` folder: Zen packages as legacy `.uasset/.uexp/.ubulk…`, rebuilt shader libraries, `scriptobjects.bin` (retoc `to-legacy`) | medium | Done, incl. N3b (UE 5.8 shader hashes, §6a.1) |
 | N4 | **Custom game support** | Game profiles ported from CUE4Parse (keys, custom encryption, block layouts, magics); per-folder profile, offered on a read failure **[decided]** | medium per game | Hook in place (§2.2); needs the user's game-specific samples |
@@ -35,9 +35,8 @@ real Windows is open (§13).
 Order **[decided 2026-11-19]**: **N3** (part of reading) → **N1** (packing raw Zen files) → N2;
 N4/N5 when samples or a new engine appear; N6 when convenient. N1 starts with its own spec round.
 
-### Non-goals (phase 1)
-- Writing anything. Packing operations return `E_NOT_SUPPORTED` and the capabilities don't
-  advertise them.
+### Non-goals
+- Packing anything that isn't already in the game (until N1b) or isn't a raw Zen file (N2).
 - UE 4.25/4.26 containers (TOC v1/v2): may happen to work, not tested or promised.
 - On-demand containers (`OnDemand` flag, `.uondemandtoc`): listed if possible, data read
   refused with a clear message **[proposed]**.
@@ -389,7 +388,7 @@ Also fixed on request although they don't affect loading (retoc fork 0717d17; UE
 - Backburner (retoc CLI): `--version UE5_8` help text ("same formats as 5.7"); a single `.utoc`
   without its global fails with "does not contain ScriptObjects" (pass the folder).
 
-## 6b. Packing raw Zen files (N1) **[decided 2026-11-19]**
+## 6b. Packing raw Zen files (N1) **[done 2026-11-19]**
 Input is what the plugin extracts raw (directory-index files, `$chunks` files). Reference checked:
 UnrealReZen (only patches packages that exist in the game: finds each file by path in the game's
 containers, reuses its chunk ID and container-header store entry, skips the rest; writes a fixed
@@ -455,6 +454,34 @@ back chunk-for-chunk identical; container header store entries unchanged); modif
 compact as uepak; encrypted 4.27 and The Isle; the empty `.pak` read by repak; TC check of the new
 pieces only; a game load test by the user (patch container + empty `.pak`).
 
+**As built (2026-11-19)** — differences from the plan above:
+- Writer: `iostore::edit::ContainerEdit` (open/create, replace, add, add_raw, remove, finish via
+  temp + rename, rollback) + `write.rs` (blocks), `perfect_hash.rs`, `dirindex.rs`; container
+  header edits in `retoc::container_header` (soft references kept). TOC round trip on 119
+  sample TOCs, perfect hash on 103 and directory index on 79 are byte-identical to UE's.
+- Undo: one `<name>.utoc.uetoc-undo` per container (old `.utoc` + partition lengths), written
+  before each change and removed after success; restore offered on the next open. No
+  `UndoLimit` (one record is all there is). New partitions are started when a block wouldn't fit
+  the partition size.
+- Encrypted containers: **no extra confirmation**; the key comes from the read lookup (prompt if
+  unknown) and new blocks + the directory index are encrypted with it.
+- Signed containers: confirmation, then written unsigned (as decided).
+- New container: TOC version, block size, compression from the game's containers; mount point
+  `NewMountPoint=Auto` = the common folder of the packed files (UE's rule), else the given one
+  (files outside it refused). A replaced/added file outside an existing container's mount point
+  moves the mount point up to the common folder. Empty v11 `.pak` = 347 bytes, read by repak.
+- Refusals list every file by reason in one message (not in the game; companion-pak files; legacy
+  cooked files → N2; read-only: `$legacy`, the global, `ContainerHeader`); nothing is changed.
+- Delete accepts `*.*` (whole folders); an empty match is refused.
+- Compact: raw block copy into a new pair, swapped in through `.uetoc-old`; also run by
+  `AutoCompactUnder` (default 10M).
+- TC: caps 223 (NEW | MODIFY | MULTIPLE | DELETE | OPTIONS | BY_CONTENT | SEARCHTEXT),
+  `BACKGROUND_PACK`; **TC needs the ANSI `PackFiles`/`DeleteFiles` exports** even when the W
+  ones exist (without them: "Error packing files!" and no call); stubs added as in uepak.
+  Busy guard + `.uetoc-lock` from uepak.
+- Not yet: the Configure dialog (ini only; `ConfigurePacker` names the ini), ReplaceWithAddition
+  (N1b), legacy input (N2).
+
 ## 7. AES keys **[decided]**: own file
 `uetoc.keys.json` in the settings directory, same format, lookup order (folder/parent folder →
 same non-zero GUID → dialog), dialog, "session only" checkbox and changed-key wording as uepak
@@ -479,14 +506,14 @@ LegacyEngineVersion=Auto    ; Auto | UE4_27 | UE5_0 … UE5_8 (§6a)
 LegacyGuessScriptTypes=0    ; 1 = ScriptStruct/Enum by name for top-level script imports (§6a.2)
 [Pack] (N1, §6b)
 PackMode=ReplaceOnly        ; ReplaceOnly | ReplaceWithAddition (later: N1b; acts as ReplaceOnly)
-Compression=Match           ; Match | None | Zlib | Gzip | LZ4 | Oodle (+ level settings)
+Compression=Match           ; Match | None | Zlib | Gzip | LZ4 | Oodle
+ZlibLevel=6 / OodleCompressor=Kraken / OodleLevel=Normal
 WriteEmptyPak=1             ; new containers: write an empty companion .pak
 WarnPakNeeded=1             ; when WriteEmptyPak=0: warn that a .pak is needed
-Compact=0 / AutoCompactUnder=10M / UndoLimit=1G / MountPoint=../../../
+Compact=0 / AutoCompactUnder=10M / NewMountPoint=Auto
 DebugLog=0
 ```
-No settings dialog in phase 1 **[proposed]**; `ConfigurePacker` opens a message box naming the
-ini file.
+No settings dialog yet; `ConfigurePacker` opens a message box naming the ini file.
 
 ## 10. Diagnostics and robustness
 Taken from uepak: panic guard on every export, `DebugLog=1` → `uetoc.log` or in-memory log +
@@ -517,6 +544,7 @@ All in the new `iostore` crate (§2.1) **[done]**:
    `PackageName` (195bf45), script import classes + `bIsAsset` (66f361d), PackageSource +
    SavedHash + script serialization offsets (0717d17), §6a.1/§6a.2.
    Measured: ~1 GB/s read + Oodle + hash (warm cache); 81 MB peak while reading a 3.5 GB chunk.
+10. Writer (N1, 3a5f9d3 + e7e9a29) and container-header edits (86693a7), §6b.
 
 ## 12. Testing
 - Test containers (project files `IOStore_UEVanilla_test_containers_v3.7z`,
@@ -597,6 +625,15 @@ crashes on start there):
   "UE 5.7 / 5.8", newest preselected, *Remember* ticked); picking 5.6 wrote
   `LegacyEngineVersion=UE5_6` into `uetoc.ini` keeping the line's comment; 110 files identical to
   retoc; the next copy used the ini value without asking.
+
+- **N1 packing (2026-11-19, 5.8 zlib sample copied to `C:\game`)**: F5 of 16 extracted files
+  onto `pakchunk11` replaced all 16 and auto-compacted; chunk hashes identical to the original.
+  Alt+F5 with an `.ini` among the files: one refusal message, nothing written. Alt+F5 of
+  `BP_SML.uasset` to a new `zzz_mod_P.ucas`: TOC v8, block 64 KiB, mount
+  `../../../Moadra/Content/Mods/SML/`, 347-byte `zzz_mod_P.pak`; opens in TC with `$chunks`,
+  `$legacy` and the folder. F8 on `$chunks\…ContainerHeader`: refused with our message, then TC's
+  "User abort!" (as uepak, `E_EABORTED`). F8 on `BP_SML.uasset`: "1 removed, rebuilt" (`.ucas`
+  64 bytes).
 
 ## 13. Open items
 - Short check on real Windows (§12a was done under Wine): dialog layout/fonts, install from
