@@ -10,6 +10,12 @@ decisions: [SPEC.md](SPEC.md).
   `.uasset`/`.umap`, `.ubulk`, `.uptnl`, …), with the mount point shown as folders.
   Chunks without a path (container header, script objects, …) are in a hidden `$chunks`
   folder. Extract and test (chunk hashes) work on everything.
+- **Legacy files**: the hidden `$legacy` folder holds the same files converted to legacy
+  cooked files (`.uasset` + `.uexp`, `.ubulk`, …, rebuilt shader libraries,
+  `scriptobjects.bin` in the global's view) with retoc's `to-legacy` code. Imports are
+  resolved across every container under the global's folder. For unversioned packages
+  whose engine version the container can't tell (UE 5.6+), a dialog asks once
+  (`LegacyEngineVersion` in `uetoc.ini`).
 - **`.utoc`**: shows one text file, `<ContainerId>.txt`, describing the header, container
   header, signatures and every chunk (fixed-width tables for Lister's monospace font). Set
   `OpenUtocAsVirtualFile=0` to open `.utoc` files like the `.ucas`.

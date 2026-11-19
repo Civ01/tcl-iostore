@@ -4,7 +4,7 @@ Total Commander 11+ packer plugin (`uetoc.wcx64`) for Unreal Engine IoStore cont
 (`.utoc` + `.ucas`). Sister of [tcl-uepak](https://github.com/Civ01/tcl-uepak) (`uepak.wcx64`,
 legacy `.pak`), whose skeleton, conventions and lessons it reuses.
 
-Spec version: v2 (2026-11-19): phase 1 (reading/extraction) done; next goals in §0. Marks: **[decided]** = user decision,
+Spec version: v3 (2026-11-19): phase 1 (reading/extraction) done; N3 (legacy view, §6a) in work, then N1. Marks: **[decided]** = user decision,
 **[proposed]** = my default, change it if you disagree, **[open]** = needs input or samples.
 
 ---
@@ -25,15 +25,15 @@ real Windows is open (§13).
 ### Next goals (candidates, to be ordered with the user)
 | # | Goal | Scope | Size | Notes |
 |---|---|---|---|---|
-| N1 | **Packing, raw** | New container from raw Zen files (what we extract), add/replace/delete in existing containers; writer in `iostore` (blocks, compression with levels, padding, perfect hash, container header rebuilt from the Zen package headers); companion `.pak` via the repak fork; `PK_CAPS_NEW/MODIFY/DELETE`; settings dialog | large | Raw round-trip first: extracted files → container that loads in the game. Same undo/compact ideas as uepak (TOC is small: rewrite it, append to `.ucas`). Open questions: version/engine selection, encryption on write, signed containers |
+| N1 | **Packing, raw** | New container from raw Zen files (what we extract), add/replace/delete in existing containers; writer in `iostore` (blocks, compression with levels, padding, perfect hash, container header rebuilt from the Zen package headers); `PK_CAPS_NEW/MODIFY/DELETE`; settings dialog | large | Raw round-trip first: extracted files → container that loads in the game. Same undo/compact ideas as uepak (TOC is small: rewrite it, append to `.ucas`). **No repak/`.pak` writing in this plugin** **[decided 2026-11-19]**: after creating a container from scratch, warn that the game only mounts it together with a same-named `.pak` (make it with uepak), warning switchable off in the ini (`WarnPakNeeded=1`). Merging both plugins is a maybe, much later. Open questions: version/engine selection, encryption on write, signed containers |
 | N2 | **Packing, legacy input** | Legacy `.uasset/.uexp/.ubulk` converted to Zen on pack (retoc `to-zen`), auto-detected, else asked once per copy session **[decided]** | large | Needs the global's script objects (already mandatory) and an engine version for the target |
-| N3 | **Legacy conversion on extract** | Optional: extract Zen packages as legacy `.uasset/.uexp` (retoc `to-legacy`) | medium | Needs global + often other containers; retoc's code exists |
+| N3 | **Legacy conversion on extract** | Hidden `$legacy` folder: Zen packages as legacy `.uasset/.uexp/.ubulk…`, rebuilt shader libraries, `scriptobjects.bin` (retoc `to-legacy`) | medium | **In work.** Design in §6a |
 | N4 | **Custom game support** | Game profiles ported from CUE4Parse (keys, custom encryption, block layouts, magics); per-folder profile, offered on a read failure **[decided]** | medium per game | Hook in place (§2.2); needs the user's game-specific samples |
 | N5 | **TOC v9/v10** | `AddedSourceHashes`, `ContainerEncryptionMethod` (AES-CTR) | small | When a released engine writes them; CUE4Parse reads them |
 | N6 | **uepak follow-ups** | Port the per-folder key-prompt grace (Find Files) to tcl-uepak; recheck its dialogs in TC under Wine | small | |
 
-Proposed order **[proposed]**: N6 (quick) → N1 → N2 → N3, with N4/N5 when samples or a new engine
-appear. N1 starts with its own spec round (decisions listed in N1's notes).
+Order **[decided 2026-11-19]**: **N3** (part of reading) → **N1** (packing raw Zen files) → N2;
+N4/N5 when samples or a new engine appear; N6 when convenient. N1 starts with its own spec round.
 
 ### Non-goals (phase 1)
 - Writing anything. Packing operations return `E_NOT_SUPPORTED` and the capabilities don't
@@ -216,6 +216,68 @@ As uepak §3.3:
   info file but not checked **[proposed]**: retoc notes they don't match a plain SHA-1 of the
   stored bytes; to be investigated with TheIsle.
 
+## 6a. Legacy view (`$legacy`, N3) **[decided 2026-11-19]**
+Extracting Zen packages as legacy cooked files (what a `.pak` holds), using retoc's `to-legacy`
+code (`asset_conversion::build_legacy`, `shader_library::rebuild_shader_library_from_io_store`).
+
+**Listing.** A hidden folder `$legacy` at the panel root (attribute `VirtualFolderAttr`, like
+`$chunks`) mirrors the container's file tree, mount point included, with legacy names:
+- each package (`.uasset`/`.umap` with an `ExportBundleData` chunk) → `X.uasset` (or `.umap`) +
+  `X.uexp` (converted), followed by its `X.ubulk` / `X.uptnl` / `X.m.ubulk`: those are the bulk
+  chunks' bytes unchanged (as retoc writes them), so they are streamed like raw files, with real
+  sizes and no memory cost (a 3.5 GB bulk chunk never sits in memory);
+- each shader library (`ShaderArchive-*.ushaderbytecode`) → the rebuilt legacy library + its
+  `ShaderAssetInfo-*.assetinfo.json`;
+- the global container's `$legacy` also holds `scriptobjects.bin` (UE 5.0+ only; retoc writes it
+  for `to-zen` round trips);
+- every other file (`.ini`, `.locres`, `AssetRegistry.bin`, …) as is.
+Raw files stay where they are; `$legacy` is extra. Sizes of converted files in the listing are
+estimates (the Zen package size for `.uasset`, 0 for `.uexp` and the asset-info JSON) **[proposed]**:
+the real size is only known after conversion.
+
+**Conversion.** On extract/test of a `$legacy` file the package is converted in memory once; its
+other files (`.uexp`, bulk) come from the same result (listed next to each other, so TC asks for
+them in a row). A failed conversion → `E_BAD_DATA` for that package's files, reason in the log.
+
+**Imports from other containers** **[decided]**: on the first legacy extraction the plugin opens
+every `.utoc` in the global's folder and its subfolders (lazily, cached for the TC session; TOCs
+only, data read on demand) and resolves imports across all of them. Containers with another TOC or
+container-header version, or encrypted with no known key (keys file or already entered), are
+skipped with a log line; no key prompts for them **[proposed]**. Imports that still can't be
+resolved become retoc's `/Engine/UnknownPackage` placeholders and are logged **[proposed]**.
+Shader asset info is built as retoc does, over all loaded containers: package store entries
+say which packages use the library, and only those packages are read.
+
+**Engine version** **[decided]**: `[Options] LegacyEngineVersion=Auto` (or `UE4_27`, `UE5_0` …
+`UE5_7`; 5.8 packages use `UE5_7`, same object version 1018).
+- `Auto`: derived from the TOC + container-header versions (retoc's heuristics, 5.1/5.2 told
+  apart per package by bulk data). Unique for 4.27, 5.0, 5.1/5.2, 5.3, 5.4, 5.5.
+- The heuristic **fails** when it gives no version (unknown combination) or several (container
+  header `SoftPackageReferencesOffset` = 5.6, 5.7 and 5.8; 5.7+ adds import type hierarchies to
+  the legacy header). Then a prompt lists the versions that fit, the ini value preselected
+  (with `Auto`: the newest candidate) **[proposed]**, and two checkboxes:
+  - *Remember (save to `uetoc.ini`)*, on by default: writes `LegacyEngineVersion`;
+  - *Don't ask again for this container*: the pick holds until a different container is
+    opened (any TC operation in between keeps it).
+  Cancel aborts the extraction (`E_EABORTED`).
+- A fixed ini value is used only if it fits the container (same container-header version as
+  that engine writes); otherwise it is ignored for that container (log line) and `Auto` applies,
+  so a remembered 5.7 never breaks a 4.27 game **[proposed]**.
+- Packages that carry their own versions (uncooked/versioned) ignore all of this.
+
+**Results (2026-11-19).** Byte-identical to retoc's own `to-legacy` (CLI, same folder) for every
+file: all vanilla samples 4.27–5.8 incl. encrypted 4.27 (490 files), G1R (1,685), compressed 5.8
+zlib/gzip/lz4 (220), The Isle server pakchunk2 (73,149, unversioned 5.6, prompt answered 5.6),
+ARK server pakchunk0+11 (328,189, unversioned, prompt answered 5.6) — ARK's 328k files convert in
+~1 min, store setup (3 containers, 19 MB of TOCs) well under a second. Versioned samples never
+prompt. **Not yet covered: shader libraries** (no sample has a `ShaderArchive-*.ushaderbytecode`;
+server builds ship none): needs a client build sample.
+
+**Integration.** retoc's conversion runs on its own container type (`IoStoreTrait`); the fork adds
+a chunk-data hook so its reads go through the `iostore` crate (partitions, AES, Oodle from
+`deps\`, one code path) and a backend built from a chosen list of containers. No `.pak` writing
+(repak) is linked into the plugin for this.
+
 ## 7. AES keys **[decided]**: own file
 `uetoc.keys.json` in the settings directory, same format, lookup order (folder/parent folder →
 same non-zero GUID → dialog), dialog, "session only" checkbox and changed-key wording as uepak
@@ -235,7 +297,9 @@ OpenUtocAsVirtualFile=1     ; .utoc shows <ContainerId>.txt; 0 = open like the .
 GlobalParentLookupLimit=5   ; parent levels searched for global.utoc (Paks boundary always applies)
 MountPoint=Folder           ; Folder | Root
 MountFolderAttr=Hidden
-VirtualFolderAttr=Hidden    ; attribute of $chunks
+VirtualFolderAttr=Hidden    ; attribute of $chunks and $legacy
+LegacyEngineVersion=Auto    ; Auto | UE4_27 | UE5_0 … UE5_7 (§6a)
+WarnPakNeeded=1             ; N1: warn after creating a container from scratch
 DebugLog=0
 ```
 No settings dialog in phase 1 **[proposed]**; `ConfigurePacker` opens a message box naming the
@@ -260,6 +324,12 @@ All in the new `iostore` crate (§2.1) **[done]**:
    (they found a 66 GB allocation from a corrupted partition count, fixed).
 7. Tests: synthetic containers (all methods, versions 3/5/6/8, encryption, partitions,
    damage) and every chunk of the sample containers (`IOSTORE_SAMPLES`, `IOSTORE_OODLE`).
+8. For the legacy view (N3), in the `retoc` crate: `ChunkDataSource` +
+   `IoStoreContainer::open_with_source` (retoc parses the TOC, data comes from `iostore`),
+   `backend_from_containers`, `build_legacy_without_bulk_data`, `FGuid::from_bytes`, a `Gzip`
+   compression method (TOCs naming it failed to parse in retoc), workspace `oodle_loader`/`repak`
+   from Civ01/repak without download (`retoc_cli` turns download back on). retoc's own
+   `test_zen_asset_identity_conversion` fails on `master` too (test files missing).
    Measured: ~1 GB/s read + Oodle + hash (warm cache); 81 MB peak while reading a 3.5 GB chunk.
 
 ## 12. Testing
@@ -309,6 +379,8 @@ All in the new `iostore` crate (§2.1) **[done]**:
 - Backburner: encrypted with a non-zero key GUID; optional segment (`.o.utoc`), partitions
   (`_sN.ucas`), `.m.ubulk`, localized packages (user will make these with a local UE install).
 - Behaviour in TC (popups, Find Files, view modes) is checked by the user, as for uepak.
+- **TC checks under Wine cover only what the current change touches** **[decided 2026-11-19]**;
+  a full pass over all TC features runs only on request.
 
 ## 12a. Observed TC behaviour (TC 11.58.1 x64 under Wine 11, 2026-11-19)
 Checked in TC itself (portable TC under WineHQ 11.0 + Xvfb in the sandbox; Ubuntu's Wine 9.0
@@ -333,6 +405,12 @@ crashes on start there):
 - Under Wine the ⚠ in the key dialog's error line shows as a box (font); fine on Windows.
 - Info file in Lister: fixed-width layout lines up (§5); Lister's wrap (key `W`) wraps at about
   75 characters, so the wide `[Chunks]` rows wrap until wrapping is switched off.
+- `$legacy` (N3 check only, 2026-11-19): hidden folder shown next to `$chunks`; F5 of `$legacy`
+  from the 5.8 sample (versioned): 22 files, identical to retoc, no prompt. The Isle server
+  (unversioned 5.6): the engine-version dialog appears once (combo box with "UE 5.6" /
+  "UE 5.7 / 5.8", newest preselected, *Remember* ticked); picking 5.6 wrote
+  `LegacyEngineVersion=UE5_6` into `uetoc.ini` keeping the line's comment; 110 files identical to
+  retoc; the next copy used the ini value without asking.
 
 ## 13. Open items
 - Short check on real Windows (§12a was done under Wine): dialog layout/fonts, install from

@@ -91,7 +91,7 @@ fn every_sample_lists_tests_and_extracts() {
         let mut arc = read::open_archive(&ucas, &listing_options(), true).unwrap_or_else(|c| panic!("{}: {}", utoc.display(), code_name(c)));
         let n_chunks = arc.container.chunk_count() as usize;
         let items = all_items(&mut arc);
-        let files = items.iter().filter(|h| h.attr & FILE_ATTR_DIRECTORY == 0).count();
+        let files = items.iter().filter(|h| h.attr & FILE_ATTR_DIRECTORY == 0 && !h.name.starts_with("$legacy\\")).count();
         assert_eq!(files, n_chunks, "{}: every chunk listed once", utoc.display());
         let keep = kept(utoc);
         // re-open and process every item: TEST for all, EXTRACT for a few
@@ -101,6 +101,8 @@ fn every_sample_lists_tests_and_extracts() {
         while let Some(h) = read::next_header(&mut arc) {
             let kind = arc.current_item().unwrap().kind.clone();
             let real = match (&kind, &keep) {
+                // the legacy view has its own test
+                _ if h.name.starts_with("$legacy") => false,
                 (ItemKind::Chunk(c), Some(k)) => k.contains(c),
                 _ => true,
             };
@@ -310,4 +312,147 @@ fn damaged_data_fails_test_but_extracts() {
         }
     }
     assert_eq!(codes, [E_BAD_DATA, 0]);
+}
+
+/// `$legacy`: every package of every (untrimmed) sample converts; outputs match retoc's
+/// own `to-legacy` when `RETOC_LEGACY_REF` points at its output for the same folder
+/// (`<ref>/<sample folder relative to IOSTORE_SAMPLES>/...`).
+#[test]
+fn legacy_view_converts_samples() {
+    let _l = lock();
+    let Some(root) = samples() else { return };
+    let reference = std::env::var_os("RETOC_LEGACY_REF").map(PathBuf::from);
+    let mut list = vec![];
+    utocs(&root, &mut list);
+    let out = tmp("legacy");
+    let (mut total, mut failed, mut compared, mut differ) = (0, 0, 0, 0);
+    for utoc in &list {
+        if kept(utoc).is_some() {
+            continue; // trimmed: most data zeroed
+        }
+        register_key(utoc);
+        legacy::reset();
+        // versioned samples need no prompt; unversioned 5.6+ ones ask: answer the newest, this container only
+        dialog::TEST_VERSION_ANSWERS.lock().unwrap().clear();
+        dialog::TEST_VERSION_PROMPTS.lock().unwrap().clear();
+        let ucas = utoc.with_extension("ucas");
+        let mut arc = read::open_archive(&ucas, &Options::default(), false).unwrap();
+        let folder = utoc.parent().unwrap().strip_prefix(&root).unwrap().to_path_buf();
+        let (mut n, mut bad) = (0, 0);
+        while let Some(h) = read::next_header(&mut arc) {
+            if !h.name.starts_with("$legacy\\") || h.attr & FILE_ATTR_DIRECTORY != 0 {
+                assert_eq!(read::process(&mut arc, PK_SKIP, None), 0);
+                continue;
+            }
+            let rel = h.name["$legacy\\".len()..].replace('\\', "/");
+            if std::env::var("LEGACY_FILTER").is_ok_and(|f| !rel.contains(&f)) {
+                assert_eq!(read::process(&mut arc, PK_SKIP, None), 0);
+                continue;
+            }
+            let dest = out.join(&folder).join(&rel);
+            {
+                let mut a = dialog::TEST_VERSION_ANSWERS.lock().unwrap();
+                if a.is_empty() {
+                    let pick = std::env::var("LEGACY_PICK").ok().and_then(|v| v.parse().ok()).unwrap_or(99);
+                    a.push((pick, false, true));
+                }
+            }
+            let code = read::process(&mut arc, PK_EXTRACT, Some(dest.clone()));
+            n += 1;
+            if code != 0 {
+                bad += 1;
+                eprintln!("  FAIL {} {}: {}", folder.display(), rel, code_name(code));
+                continue;
+            }
+            if let Some(r) = &reference {
+                let theirs = r.join(&folder).join(&rel);
+                if let Ok(t) = std::fs::read(&theirs) {
+                    compared += 1;
+                    if t != std::fs::read(&dest).unwrap() {
+                        differ += 1;
+                        eprintln!("  DIFF {}", theirs.display());
+                        if std::env::var_os("LEGACY_KEEP_DIFF").is_some() {
+                            let _ = std::fs::copy(&dest, std::env::temp_dir().join(format!("diff-{differ}.bin")));
+                        }
+                    }
+                }
+                // big reference sets: don't keep a second copy
+                let _ = std::fs::remove_file(&dest);
+            }
+        }
+        if utoc.to_string_lossy().contains("packed_as_versioned") {
+            assert!(dialog::TEST_VERSION_PROMPTS.lock().unwrap().is_empty(), "{}: versioned packages need no engine version", utoc.display());
+        }
+        total += n;
+        failed += bad;
+        eprintln!("{:<75} {n} legacy files, {bad} failed", utoc.strip_prefix(&root).unwrap().display());
+    }
+    eprintln!("legacy: {total} files, {failed} failed, {compared} compared with retoc, {differ} differ");
+    assert_eq!(failed, 0);
+    assert_eq!(differ, 0);
+}
+
+/// Engine-version prompt rules (SPEC §6a) on an unversioned UE 5.6 container
+/// (`IOSTORE_UNVERSIONED_56` = its `.utoc`, e.g. The Isle server's pakchunk2; key in key.txt).
+#[test]
+fn legacy_version_prompt() {
+    let _l = lock();
+    let Some(utoc) = std::env::var_os("IOSTORE_UNVERSIONED_56").map(PathBuf::from) else { return };
+    if let Some(o) = std::env::var_os("IOSTORE_OODLE") {
+        iostore::set_oodle_search_paths([PathBuf::from(o)]);
+    }
+    register_key(&utoc);
+    legacy::reset();
+    let ucas = utoc.with_extension("ucas");
+    let prompts = || dialog::TEST_VERSION_PROMPTS.lock().unwrap().clone();
+    let answer = |a: (usize, bool, bool)| dialog::TEST_VERSION_ANSWERS.lock().unwrap().push(a);
+    let out = tmp("legacyver");
+    // extracts the first `n` package files of a fresh handle; returns the codes
+    let run = |o: &Options, n: usize| -> Vec<c_int> {
+        let mut arc = read::open_archive(&ucas, o, false).unwrap();
+        let mut codes = vec![];
+        while let Some(h) = read::next_header(&mut arc) {
+            if codes.len() < n && h.name.starts_with("$legacy\\") && h.name.ends_with(".uasset") {
+                codes.push(read::process(&mut arc, PK_EXTRACT, Some(out.join(h.name.replace('\\', "/")))));
+            } else {
+                read::process(&mut arc, PK_SKIP, None);
+            }
+        }
+        codes
+    };
+    dialog::TEST_VERSION_PROMPTS.lock().unwrap().clear();
+    dialog::TEST_VERSION_ANSWERS.lock().unwrap().clear();
+    let auto = Options::default();
+    // Auto, ambiguous header: one prompt per handle, versions that fit, newest preselected
+    answer((0, false, false));
+    assert_eq!(run(&auto, 3), [0, 0, 0]);
+    assert_eq!(prompts(), [(vec!["UE 5.6".to_string(), "UE 5.7 / 5.8".to_string()], 1)]);
+    // no "don't ask again": the next handle asks again; with it, not any more
+    answer((1, false, true));
+    assert_eq!(run(&auto, 2), [0, 0]);
+    assert_eq!(prompts().len(), 2);
+    assert_eq!(run(&auto, 2), [0, 0]);
+    assert_eq!(prompts().len(), 2);
+    // opening another container ends the pick
+    let global = utoc.with_file_name("global.utoc");
+    let _ = read::open_archive(&global, &auto, false);
+    answer((0, false, false));
+    assert_eq!(run(&auto, 1), [0]);
+    assert_eq!(prompts().len(), 3);
+    // cancel: aborts this handle's legacy files
+    assert_eq!(run(&auto, 2), [E_EABORTED, E_EABORTED]);
+    assert_eq!(prompts().len(), 4);
+    // a fixed ini value that fits: no prompt; one that doesn't fit (4.27): Auto, so a prompt
+    // with the ini value not in the list (newest preselected)
+    let fixed = Options { legacy_engine_version: Some(retoc::version::EngineVersion::UE5_7), ..Options::default() };
+    assert_eq!(run(&fixed, 2), [0, 0]);
+    assert_eq!(prompts().len(), 4);
+    let wrong = Options { legacy_engine_version: Some(retoc::version::EngineVersion::UE4_27), ..Options::default() };
+    answer((0, false, false));
+    assert_eq!(run(&wrong, 1), [0]);
+    assert_eq!(prompts().len(), 5);
+    // 5.6 ini value preselects 5.6 when asking is needed: covered by `selected` = ini position
+    let five_six = Options { legacy_engine_version: Some(retoc::version::EngineVersion::UE5_6), ..Options::default() };
+    assert_eq!(run(&five_six, 1), [0]);
+    assert_eq!(prompts().len(), 5, "a fitting ini value never asks");
 }

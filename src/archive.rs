@@ -19,6 +19,10 @@ pub enum ItemKind {
     Chunk(u32),
     /// The generated `<ContainerId>.txt`.
     InfoFile,
+    /// The `$legacy` folder.
+    LegacyDir,
+    /// A converted file in `$legacy`.
+    Legacy(crate::legacy::LegacyKind),
 }
 
 #[derive(Debug, Clone)]
@@ -32,7 +36,7 @@ pub struct Item {
 
 impl Item {
     pub fn is_dir(&self) -> bool {
-        matches!(self.kind, ItemKind::MountDir | ItemKind::ChunksDir)
+        matches!(self.kind, ItemKind::MountDir | ItemKind::ChunksDir | ItemKind::LegacyDir)
     }
 }
 
@@ -53,6 +57,16 @@ pub struct Archive {
     pub partition_warned: bool,
     /// A key prompt for data was cancelled on this handle.
     pub key_declined: bool,
+    /// The global container's `.utoc` (found on open).
+    pub global: Option<PathBuf>,
+    /// Legacy conversion state, created on the first `$legacy` extraction.
+    pub legacy: Option<crate::legacy::Session>,
+    /// The legacy view could not be set up (shown once per handle).
+    pub legacy_error: Option<String>,
+    /// The engine-version prompt was cancelled on this handle.
+    pub legacy_declined: bool,
+    /// `LegacyEngineVersion` when the archive was opened (`None` = Auto).
+    pub legacy_version: Option<retoc::version::EngineVersion>,
 }
 
 /// Rejects entry names that would escape the destination folder.
@@ -76,6 +90,11 @@ impl Archive {
             oodle_warned: false,
             partition_warned: false,
             key_declined: false,
+            global: None,
+            legacy: None,
+            legacy_error: None,
+            legacy_declined: false,
+            legacy_version: options.legacy_engine_version,
         }
     }
 
@@ -113,6 +132,7 @@ impl Archive {
         }
         let mut named = vec![false; c.chunk_count() as usize];
         let mut skipped = 0;
+        let mut safe_files: Vec<(String, u32)> = Vec::new();
         for f in &index.files {
             let Ok(info) = c.chunk(f.toc_index) else {
                 crate::dlog!("  skipped {:?}: TOC entry {} doesn't exist", f.path, f.toc_index);
@@ -125,6 +145,7 @@ impl Archive {
                 continue;
             }
             named[f.toc_index as usize] = true;
+            safe_files.push((f.path.clone(), f.toc_index));
             let rel = f.path.replace('/', "\\");
             let display = if prefix.is_empty() { rel } else { format!("{prefix}\\{rel}") };
             a.items.push(Item { display, kind: ItemKind::Chunk(f.toc_index), pack: info.packed_size, unpack: info.size });
@@ -138,6 +159,26 @@ impl Archive {
                     kind: ItemKind::Chunk(i.index),
                     pack: i.packed_size,
                     unpack: i.size,
+                });
+            }
+        }
+        // legacy view (SPEC §6a)
+        let planned = crate::legacy::plan(c, &safe_files);
+        if !planned.is_empty() {
+            use crate::legacy::{Planned, LEGACY_DIR};
+            a.items.push(Item { display: LEGACY_DIR.into(), kind: ItemKind::LegacyDir, pack: 0, unpack: 0 });
+            let shown = |rel: &str| {
+                let rel = rel.replace('/', "\\");
+                if prefix.is_empty() { format!("{LEGACY_DIR}\\{rel}") } else { format!("{LEGACY_DIR}\\{prefix}\\{rel}") }
+            };
+            for p in planned {
+                a.items.push(match p {
+                    Planned::Legacy { rel, kind, size } => {
+                        // scriptobjects.bin goes to the root, as retoc writes it
+                        let display = if matches!(kind, crate::legacy::LegacyKind::ScriptObjects) { format!("{LEGACY_DIR}\\{rel}") } else { shown(&rel) };
+                        Item { display, kind: ItemKind::Legacy(kind), pack: size, unpack: size }
+                    }
+                    Planned::Raw { rel, index, pack, size } => Item { display: shown(&rel), kind: ItemKind::Chunk(index), pack, unpack: size },
                 });
             }
         }

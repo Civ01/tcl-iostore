@@ -37,6 +37,8 @@ pub struct Options {
     /// Attribute of the `$chunks` folder.
     pub virtual_folder_attr: u32,
     pub debug_log: bool,
+    /// `LegacyEngineVersion`: engine version for unversioned packages in `$legacy`; `None` = Auto.
+    pub legacy_engine_version: Option<retoc::version::EngineVersion>,
     /// Problems found while parsing (logged; invalid values keep defaults).
     pub warnings: Vec<String>,
 }
@@ -50,6 +52,7 @@ impl Default for Options {
             mount_folder_attr: ATTR_HIDDEN,
             virtual_folder_attr: ATTR_HIDDEN,
             debug_log: false,
+            legacy_engine_version: None,
             warnings: vec![],
         }
     }
@@ -129,6 +132,77 @@ pub fn load_options() -> Options {
     }
 }
 
+/// Sets `[Options] key=value` in the settings directory's ini, keeping everything else
+/// (a shipped default in the plugin folder is copied first).
+pub fn set_option(key: &str, value: &str) -> std::io::Result<()> {
+    let dir = settings_dir().ok_or_else(|| std::io::Error::other("no settings folder"))?;
+    let path = dir.join(INI_NAME);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => ini_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default(),
+    };
+    std::fs::write(&path, set_option_text(&text, key, value))
+}
+
+pub fn set_option_text(text: &str, key: &str, value: &str) -> String {
+    let norm = |k: &str| k.trim().to_ascii_lowercase().replace('_', "");
+    let want = norm(key);
+    let mut out: Vec<String> = Vec::new();
+    let mut section = String::new();
+    let mut options_end: Option<usize> = None;
+    let mut done = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(name) = t.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            if section == "options" && options_end.is_none() {
+                options_end = Some(out.len());
+            }
+            section = name.trim().to_ascii_lowercase();
+            out.push(line.to_string());
+            continue;
+        }
+        if section == "options" && !done && !t.starts_with(';') && !t.starts_with('#') {
+            if let Some((k, rest)) = line.split_once('=') {
+                if norm(k) == want {
+                    // keep an inline comment
+                    let comment = match rest.find(';') {
+                        Some(i) if i > 0 && rest[..i].ends_with([' ', '\t']) => &rest[rest[..i].trim_end().len()..],
+                        _ => "",
+                    };
+                    out.push(format!("{}={value}{comment}", k.trim_end()));
+                    done = true;
+                    continue;
+                }
+            }
+        }
+        out.push(line.to_string());
+    }
+    if !done {
+        let line = format!("{key}={value}");
+        match (section == "options", options_end) {
+            (_, Some(i)) => {
+                // before blank lines that end the section
+                let mut i = i;
+                while i > 0 && out[i - 1].trim().is_empty() {
+                    i -= 1;
+                }
+                out.insert(i, line)
+            }
+            (true, None) => out.push(line),
+            (false, None) => {
+                if out.last().is_some_and(|l| !l.trim().is_empty()) {
+                    out.push(String::new());
+                }
+                out.push("[Options]".into());
+                out.push(line);
+            }
+        }
+    }
+    let mut s = out.join("\r\n");
+    s.push_str("\r\n");
+    s
+}
+
 pub fn parse_options(text: &str) -> Options {
     let mut opts = Options::default();
     let mut section = String::new();
@@ -174,6 +248,10 @@ pub fn parse_options(text: &str) -> Options {
             "mountfolderattr" => opts.mount_folder_attr = parse_attr_list(raw),
             "virtualfolderattr" => opts.virtual_folder_attr = parse_attr_list(raw),
             "debuglog" => opts.debug_log = parse_bool(raw).unwrap_or(false),
+            "legacyengineversion" => match crate::legacy::parse_version(raw) {
+                Ok(v) => opts.legacy_engine_version = v,
+                Err(()) => bad(&key),
+            },
             _ => {}
         }
     }
@@ -203,5 +281,18 @@ mod tests {
         assert_eq!(bad.global_lookup_limit, 5);
         assert_eq!(bad.warnings.len(), 2);
         assert!(!parse_options("[Other]\nDebugLog=1").debug_log);
+        assert_eq!(parse_options("[Options]\nLegacyEngineVersion=UE5_7").legacy_engine_version, Some(retoc::version::EngineVersion::UE5_7));
+        assert_eq!(parse_options("[Options]\nLegacyEngineVersion=Auto").legacy_engine_version, None);
+    }
+
+    #[test]
+    fn set_option_keeps_the_rest() {
+        let t = set_option_text("; top\n[Options]\nDebugLog=0\nLegacyEngineVersion=Auto    ; c\n\n[Other]\nX=1\n", "LegacyEngineVersion", "UE5_7");
+        assert_eq!(t, "; top\r\n[Options]\r\nDebugLog=0\r\nLegacyEngineVersion=UE5_7    ; c\r\n\r\n[Other]\r\nX=1\r\n");
+        let t = set_option_text("[Options]\nDebugLog=0\n\n[Other]\nX=1", "LegacyEngineVersion", "UE5_6");
+        assert_eq!(t, "[Options]\r\nDebugLog=0\r\nLegacyEngineVersion=UE5_6\r\n\r\n[Other]\r\nX=1\r\n");
+        assert_eq!(set_option_text("", "A", "1"), "[Options]\r\nA=1\r\n");
+        assert_eq!(set_option_text("[Options]\nB=2", "A", "1"), "[Options]\r\nB=2\r\nA=1\r\n");
+        assert_eq!(parse_options(&t).legacy_engine_version, Some(retoc::version::EngineVersion::UE5_6));
     }
 }

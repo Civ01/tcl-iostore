@@ -49,6 +49,45 @@ pub fn confirm(text: &str) -> bool {
     crate::win::ask_yes_no(text)
 }
 
+/// Engine-version prompt for the legacy view (SPEC §6a).
+pub struct VersionPrompt<'a> {
+    pub container: &'a Path,
+    pub choices: &'a [&'a str],
+    pub selected: usize,
+    /// The choices are the versions that fit the container (false: none fit, all listed).
+    pub known: bool,
+}
+
+pub struct VersionAnswer {
+    pub index: usize,
+    /// Save to uetoc.ini.
+    pub remember: bool,
+    /// Don't ask again until another container is opened.
+    pub session: bool,
+}
+
+/// (index, remember, session) answers for tests; empty = Cancel.
+#[cfg(test)]
+pub static TEST_VERSION_ANSWERS: std::sync::Mutex<Vec<(usize, bool, bool)>> = std::sync::Mutex::new(Vec::new());
+/// (choices, selected) of each version prompt shown (tests).
+#[cfg(test)]
+pub static TEST_VERSION_PROMPTS: std::sync::Mutex<Vec<(Vec<String>, usize)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn prompt_version(p: &VersionPrompt) -> Option<VersionAnswer> {
+    #[cfg(test)]
+    {
+        TEST_VERSION_PROMPTS.lock().unwrap().push((p.choices.iter().map(|s| s.to_string()).collect(), p.selected));
+        let mut q = TEST_VERSION_ANSWERS.lock().unwrap();
+        if q.is_empty() {
+            return None;
+        }
+        let (index, remember, session) = q.remove(0);
+        Some(VersionAnswer { index, remember, session })
+    }
+    #[cfg(not(test))]
+    imp::prompt_version(p)
+}
+
 /// Shows the dialog. `None` = cancelled.
 pub fn prompt_key(p: &KeyPrompt) -> Option<KeyAnswer> {
     #[cfg(test)]
@@ -322,6 +361,102 @@ mod imp {
         }
         st.answer
     }
+
+
+    // ---- engine version prompt (legacy view)
+
+    const ID_VINFO: u16 = 200;
+    const ID_VLIST: u16 = 201;
+    const ID_VREMEMBER: u16 = 202;
+    const ID_VSESSION: u16 = 203;
+    const CB_ADDSTRING: u32 = 0x0143;
+    const CB_SETCURSEL: u32 = 0x014E;
+    const CB_GETCURSEL: u32 = 0x0147;
+    const BM_SETCHECK: u32 = 0x00F1;
+
+    struct VState {
+        info: Vec<u16>,
+        choices: Vec<Vec<u16>>,
+        selected: usize,
+        answer: Option<VersionAnswer>,
+    }
+
+    fn version_template() -> Vec<u32> {
+        const BUTTON: u16 = 0x80;
+        const STATIC: u16 = 0x82;
+        const COMBOBOX: u16 = 0x85;
+        const SS_NOPREFIX: u32 = 0x80;
+        const CBS_DROPDOWNLIST: u32 = 3;
+        const BS_DEFPUSHBUTTON: u32 = 1;
+        const BS_AUTOCHECKBOX: u32 = 3;
+        let mut t = Tpl::dialog("UE IoStore plugin: engine version", 310, 150);
+        t.item(STATIC, SS_NOPREFIX, 7, 7, 296, 58, ID_VINFO, "");
+        t.item(STATIC, 0, 7, 70, 80, 9, 0xFFFF, "&Engine version:");
+        t.item(COMBOBOX, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 90, 68, 120, 120, ID_VLIST, "");
+        t.item(BUTTON, BS_AUTOCHECKBOX | WS_TABSTOP, 7, 88, 296, 10, ID_VREMEMBER, "&Remember (save as LegacyEngineVersion in uetoc.ini)");
+        t.item(BUTTON, BS_AUTOCHECKBOX | WS_TABSTOP, 7, 102, 296, 10, ID_VSESSION, "&Don't ask again for this container (until another one is opened)");
+        t.item(BUTTON, BS_DEFPUSHBUTTON | WS_TABSTOP, 199, 129, 50, 14, 1, "OK");
+        t.item(BUTTON, WS_TABSTOP, 253, 129, 50, 14, 2, "Cancel");
+        t.into_dwords()
+    }
+
+    unsafe extern "system" fn vproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> isize {
+        match msg {
+            WM_INITDIALOG => {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, lp);
+                let st = &*(lp as *const VState);
+                SetDlgItemTextW(hwnd, ID_VINFO as i32, st.info.as_ptr());
+                for c in &st.choices {
+                    SendDlgItemMessageW(hwnd, ID_VLIST as i32, CB_ADDSTRING, 0, c.as_ptr() as LPARAM);
+                }
+                SendDlgItemMessageW(hwnd, ID_VLIST as i32, CB_SETCURSEL, st.selected, 0);
+                SendDlgItemMessageW(hwnd, ID_VREMEMBER as i32, BM_SETCHECK, 1, 0);
+                1
+            }
+            WM_COMMAND => {
+                let id = (wp & 0xFFFF) as i32;
+                let st = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut VState;
+                if id == 1 && !st.is_null() {
+                    let sel = SendDlgItemMessageW(hwnd, ID_VLIST as i32, CB_GETCURSEL, 0, 0);
+                    (*st).answer = Some(VersionAnswer {
+                        index: if sel < 0 { (*st).selected } else { sel as usize },
+                        remember: SendDlgItemMessageW(hwnd, ID_VREMEMBER as i32, BM_GETCHECK, 0, 0) == 1,
+                        session: SendDlgItemMessageW(hwnd, ID_VSESSION as i32, BM_GETCHECK, 0, 0) == 1,
+                    });
+                    EndDialog(hwnd, 1);
+                    return 1;
+                }
+                if id == 2 {
+                    EndDialog(hwnd, 0);
+                    return 1;
+                }
+                0
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn prompt_version(p: &VersionPrompt) -> Option<VersionAnswer> {
+        let name = p.container.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let why = if p.known {
+            "The packages carry no engine version, and the container's format is written by more than one engine version."
+        } else {
+            "The packages carry no engine version, and the container's format doesn't tell which engine wrote it."
+        };
+        let info = format!(
+            "Converting to legacy files (.uasset/.uexp) needs the engine version.\n{why}\nPick the game's engine version.\nContainer: {name}"
+        );
+        let mut st = VState { info: wide(&info), choices: p.choices.iter().map(|c| wide(c)).collect(), selected: p.selected, answer: None };
+        let tpl = version_template();
+        let r = unsafe {
+            DialogBoxIndirectParamW(crate::win::module_handle(), tpl.as_ptr() as *const DLGTEMPLATE, GetActiveWindow(), Some(vproc), &mut st as *mut VState as LPARAM)
+        };
+        if r == -1 {
+            let err = unsafe { GetLastError() };
+            crate::dlog!("version dialog could not be created (error {err})");
+        }
+        st.answer
+    }
 }
 
 
@@ -329,6 +464,9 @@ mod imp {
 mod imp {
     use super::*;
     pub fn prompt(_p: &KeyPrompt) -> Option<KeyAnswer> {
+        None
+    }
+    pub fn prompt_version(_p: &VersionPrompt) -> Option<VersionAnswer> {
         None
     }
 }

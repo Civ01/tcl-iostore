@@ -250,6 +250,7 @@ pub fn open_archive(path: &Path, options: &config::Options, list_mode: bool) -> 
         (path.to_path_buf(), if options.open_utoc_as_virtual_file { View::Info } else { View::Listing })
     };
     dlog!("  utoc {} view={view:?}", utoc.display());
+    crate::legacy::note_opened(&utoc);
 
     let started = Instant::now();
     let mut c = Container::open(&utoc, crate::profile::profile_for(&utoc)).map_err(|e| {
@@ -362,6 +363,8 @@ pub fn open_archive(path: &Path, options: &config::Options, list_mode: bool) -> 
             arc
         }
     };
+    let mut arc = arc;
+    arc.global = Some(global.utoc.clone());
     dlog!("  opened in {} ms: {} items ({} files)", started.elapsed().as_millis(), arc.items.len(), arc.file_count());
     Ok(arc)
 }
@@ -383,7 +386,7 @@ pub fn next_header(arc: &mut Archive) -> Option<HeaderOut> {
     let item = arc.next_item()?;
     let attr = match item.kind {
         ItemKind::MountDir => FILE_ATTR_DIRECTORY | mount_attr,
-        ItemKind::ChunksDir => FILE_ATTR_DIRECTORY | virt_attr,
+        ItemKind::ChunksDir | ItemKind::LegacyDir => FILE_ATTR_DIRECTORY | virt_attr,
         _ => FILE_ATTR_ARCHIVE,
     };
     Some(HeaderOut { name: item.display.clone(), pack: item.pack, unpack: item.unpack, time, attr })
@@ -429,7 +432,8 @@ pub fn process(arc: &mut Archive, op: c_int, dest: Option<PathBuf>) -> c_int {
     }
     let started = Instant::now();
     match item.kind {
-        ItemKind::MountDir | ItemKind::ChunksDir => {
+        ItemKind::Legacy(kind) => process_legacy(arc, op, dest, &item.display, kind),
+        ItemKind::MountDir | ItemKind::ChunksDir | ItemKind::LegacyDir => {
             if op == PK_EXTRACT {
                 if let Some(d) = &dest {
                     if let Err(e) = std::fs::create_dir_all(d) {
@@ -546,6 +550,111 @@ pub fn process(arc: &mut Archive, op: c_int, dest: Option<PathBuf>) -> c_int {
             code
         }
     }
+}
+
+/// Writes a file produced in memory (`dest` None = test).
+fn write_bytes(dest: Option<&Path>, display: &str, bytes: &[u8]) -> c_int {
+    let Some(d) = dest else {
+        let mut name = win::wide(display);
+        return if progress::report(&mut name, bytes.len() as u64) { 0 } else { E_EABORTED };
+    };
+    if let Some(parent) = d.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::write(d, bytes) {
+        Ok(()) => {
+            let mut name = win::wide(&d.to_string_lossy());
+            if progress::report(&mut name, bytes.len() as u64) {
+                0
+            } else {
+                E_EABORTED
+            }
+        }
+        Err(e) => {
+            dlog!("  write failed: {e}");
+            let _ = std::fs::remove_file(d);
+            if e.kind() == std::io::ErrorKind::NotFound || e.kind() == std::io::ErrorKind::PermissionDenied {
+                E_ECREATE
+            } else {
+                E_EWRITE
+            }
+        }
+    }
+}
+
+/// Extract/test of a `$legacy` file (SPEC §6a).
+fn process_legacy(arc: &mut Archive, op: c_int, dest: Option<PathBuf>, display: &str, kind: crate::legacy::LegacyKind) -> c_int {
+    use crate::legacy::{LegacyError, LegacyKind, Session};
+    if arc.legacy_declined {
+        return E_EABORTED;
+    }
+    if op == PK_EXTRACT && dest.is_none() {
+        return E_ECREATE;
+    }
+    if arc.legacy.is_none() {
+        if arc.legacy_error.is_some() {
+            return E_BAD_DATA;
+        }
+        let Some(global) = arc.global.clone() else { return E_BAD_DATA };
+        let utoc = arc.container.utoc_path().to_path_buf();
+        match Session::open(&global, &utoc) {
+            Ok(s) => arc.legacy = Some(s),
+            Err(e) => {
+                let msg = match e {
+                    LegacyError::Failed(m) | LegacyError::Oodle(m) => m,
+                    LegacyError::Cancelled => String::new(),
+                };
+                dlog!("  legacy view unavailable: {msg}");
+                show_error(&format!("{}\n\nThe legacy view can't be used: {msg}", arc.path.display()));
+                arc.legacy_error = Some(msg);
+                log::on_error();
+                return E_BAD_DATA;
+            }
+        }
+    }
+    let started = Instant::now();
+    let ini = arc.legacy_version;
+    let session = arc.legacy.as_mut().unwrap();
+    let container = &arc.container;
+    let owned;
+    let bytes: Result<&[u8], LegacyError> = match &kind {
+        LegacyKind::Package { chunk, part, path } => session.package_part(container, *chunk, path, *part, ini),
+        LegacyKind::ShaderLibrary { chunk, asset_info } => session.shader_part(container, *chunk, *asset_info),
+        LegacyKind::ScriptObjects => match session.script_objects() {
+            Ok(v) => {
+                owned = v;
+                Ok(&owned)
+            }
+            Err(e) => Err(e),
+        },
+    };
+    let code = match bytes {
+        Ok(b) => write_bytes(if op == PK_TEST { None } else { dest.as_deref() }, display, b),
+        Err(LegacyError::Cancelled) => {
+            arc.legacy_declined = true;
+            E_EABORTED
+        }
+        Err(LegacyError::Oodle(detail)) => {
+            if !arc.oodle_warned {
+                arc.oodle_warned = true;
+                show_warning(&oodle_missing_text(&arc.path, &detail));
+            }
+            E_NOT_SUPPORTED
+        }
+        Err(LegacyError::Failed(msg)) => {
+            dlog!("  conversion failed: {msg}");
+            E_BAD_DATA
+        }
+    };
+    if code == 0 {
+        dlog!("  ok in {} ms", started.elapsed().as_millis());
+    } else {
+        dlog!("  -> {}", crate::code_name(code));
+        if code != E_EABORTED {
+            log::on_error();
+        }
+    }
+    code
 }
 
 fn container_error_code(arc: &mut Archive, e: &IoError) -> c_int {

@@ -15,6 +15,7 @@ pub mod ffi;
 pub mod global;
 pub mod info;
 pub mod keys;
+pub mod legacy;
 pub mod log;
 pub mod profile;
 mod progress;
