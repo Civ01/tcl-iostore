@@ -363,21 +363,23 @@ Fixed (retoc fork 66f361d, plugin uses it):
   transient, not a plain `UClass` (Blueprint/Verse classes override `UClass::IsAsset`). retoc also
   required `Standalone|Transactional`, so every Blueprint class asset had 0 (15 of 16 packages).
 
-Not changed, with the reason (UE 5.8.4 source):
-- **`PackageSource`** = `FCrc::StrCrc_DEPRECATED(upper(file base name))` (2-byte chars; verified).
-  Not read by `FLinkerLoad`, the Zen loader or `UPackage`; shipping editors even write a random
-  value. No effect on loading; can be filled exactly if wanted.
-- **`SavedHash`** = BLAKE3-160 of `.uasset` + `.uexp` without the 4-byte footer, field zeroed
-  (verified). Only copied into `UPackage` in editor builds (`WITH_EDITORONLY_DATA`); not checked.
-  No effect on loading; can be computed over our own output.
+Also fixed on request although they don't affect loading (retoc fork 0717d17; UE 5.8.4 source):
+- **`PackageSource`** = `FCrc::StrCrc_DEPRECATED(upper(file base name))` (2-byte chars), now written
+  exactly (BP_SML, M_dummy, T_dummy match the engine). Not read by `FLinkerLoad`, the Zen loader or
+  `UPackage`; shipping editors even write a random value.
+- **`SavedHash`** = BLAKE3-160 of `.uasset` + `.uexp` without the 4-byte footer, field zeroed; now
+  computed over our own output (valid, equals the engine's only where the header does). Only
+  copied into `UPackage` in editor builds; not checked.
 - **`ScriptSerializationStart/EndOffset`** (only packages with tagged properties, i.e. without
-  `PKG_UnversionedProperties`; the Zen loader never sees them): retoc writes `(0, SerialSize)`; the
-  engine writes the tagged-property range (BP_SML class 0–38 of 1105, functions 0–9).
-  `FLinkerLoad::MarkScriptSerializationStart/End` `checkf` these against the real positions, so
-  loading such a file through the legacy loader asserts in builds with checks (editor,
-  Debug/Development games running legacy .paks); Shipping/Test builds compile the check out and
-  only the editor's property-bag path uses the values. Fix = scan the tag stream for its `None`
-  terminator (tags carry their size); later.
+  `PKG_UnversionedProperties`; the Zen loader never sees them): retoc wrote `(0, SerialSize)`;
+  `FLinkerLoad::MarkScriptSerializationStart/End` `checkf` them against the real positions, so such a
+  file asserted when loaded through the legacy loader in builds with checks (editor,
+  Debug/Development); Shipping compiles the check out. Now the real range: walk the tag stream
+  (control byte, tags carrying their sizes; 5.4+ and 5.2/5.3 layouts) to its `None`; an export that
+  doesn't parse keeps the old value. Matches the engine on BP_SML (class 0–38, CDO 0–130, functions
+  0–9), M_dummy (0–99) and the 1 MB T_dummy (0–131).
+- Seen while checking, not fixed: `bNotAlwaysLoadedForEditorGame` (engine 1 on M_dummy/T_dummy,
+  retoc 0; editor-game flag, not found in `FLinkerLoad`; not investigated further).
 - **Zen `_Unused` (was CookedHeaderSize)**: UE ≤5.6 stores the legacy header size; 5.7.0–5.7.4
   store size − 8; 5.8 size − 8 − 8 × imports (PackageStoreOptimizer.cpp, frozen to keep patches
   small). retoc treats it as the size: harmless for `$legacy` (padding only); N2 must write the
@@ -512,7 +514,8 @@ All in the new `iostore` crate (§2.1) **[done]**:
    from Civ01/repak without download (`retoc_cli` turns download back on). retoc's own
    `test_zen_asset_identity_conversion` fails on `master` too (test files missing).
 9. UE 5.8 and legacy fixes in the `retoc` crate: 8-byte shader hashes (7346193), cooked import
-   `PackageName` (195bf45), script import classes + `bIsAsset` (66f361d), §6a.1/§6a.2.
+   `PackageName` (195bf45), script import classes + `bIsAsset` (66f361d), PackageSource +
+   SavedHash + script serialization offsets (0717d17), §6a.1/§6a.2.
    Measured: ~1 GB/s read + Oodle + hash (warm cache); 81 MB peak while reading a 3.5 GB chunk.
 
 ## 12. Testing
