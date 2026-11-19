@@ -427,7 +427,7 @@ fn legacy_version_prompt() {
     // Auto, ambiguous header: one prompt per handle, versions that fit, newest preselected
     answer((0, false, false));
     assert_eq!(run(&auto, 3), [0, 0, 0]);
-    assert_eq!(prompts(), [(vec!["UE 5.6".to_string(), "UE 5.7 / 5.8".to_string()], 1)]);
+    assert_eq!(prompts(), [(vec!["UE 5.6".to_string(), "UE 5.7".to_string(), "UE 5.8".to_string()], 2)]);
     // no "don't ask again": the next handle asks again; with it, not any more
     answer((1, false, true));
     assert_eq!(run(&auto, 2), [0, 0]);

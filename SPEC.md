@@ -249,8 +249,12 @@ Shader asset info is built as retoc does, over all loaded containers: package st
 say which packages use the library, and only those packages are read.
 
 **Engine version** **[decided]**: `[Options] LegacyEngineVersion=Auto` (or `UE4_27`, `UE5_0` …
-`UE5_8`). 5.7 and 5.8 packages are the same (object version 1018); 5.8 differs only in shader
-hashes (§6a.1), which are detected, so the version never changes shader output.
+`UE5_8`). 5.7 and 5.8 share the object version (1018) but **not the legacy layout**: UE 5.8 writes
+`PackageName` into the imports of cooked packages too (ObjectName stands in for None), earlier
+engines only uncooked (found 2026-11-19 via tcl-uassetvw; retoc never wrote it — fixed in the fork,
+195bf45). How 5.8 is told apart: 8-byte shader hashes in the store entries (§6a.1); for versioned
+packages their custom versions (FUE5ReleaseStream/UE5MainStream/FortniteMainBranch above the 5.7
+values 61/121/225, measured on the samples); else the prompt offers 5.6 / 5.7 / 5.8 separately.
 - `Auto`: derived from the TOC + container-header versions (retoc's heuristics, 5.1/5.2 told
   apart per package by bulk data). Unique for 4.27, 5.0, 5.1/5.2, 5.3, 5.4, 5.5.
 - The heuristic **fails** when it gives no version (unknown combination) or several (container
@@ -300,12 +304,16 @@ IoStore-library version change (CUE4Parse keys it on `GAME_UE5_8`). It affects:
   xxHash128 over the hashes, N2).
 - Plugin: `UE5_8` in the ini/prompt. Candidates are narrowed by the shader hash size found in the
   loaded containers' store entries: 8 bytes ⇒ 5.8, no prompt; 20 bytes ⇒ 5.6 or 5.7; none (e.g.
-  server builds) ⇒ 5.6 or "UE 5.7 / 5.8" (one entry, same packages).
+  server builds) ⇒ versioned packages decide by custom versions, unversioned ones ask 5.6/5.7/5.8.
+  (An earlier "UE 5.7 / 5.8" merged entry was wrong: see the import layout above.)
 - Results on the sample: no prompt; shader libraries **same content as the engine's** (both the
   cook's `ShaderLibrarySource` and the `.pak`: 301 maps / 3,767 shaders and 4 / 36, code
   identical after decompression; `tools/shaderlib_compare.py`); `.uexp` byte-identical to the
-  `.pak`; `.uasset` equivalent but not byte-identical (retoc can't restore the saved package hash,
-  name hashes, name/import order: Zen drops them; same for all versions); asset info lists only
+  `.pak`; `.uasset` equivalent but not byte-identical. After the PackageName fix the import maps match the
+  engine's except retoc's class name `Object` for imports of script functions/structs (engine:
+  `Function`/`ScriptStruct`; script objects carry no class), plus the saved package hash, name
+  hashes, package source CRC and fewer preload dependencies (BP_SML: 127 vs 205) — all versions,
+  Zen drops or retoc approximates them; asset info lists only
   packages present in the containers (engine also lists plugin materials and global "None"
   entries). Earlier samples unchanged (byte-identical to the previous references).
 - TC check (N3b only): F5 of `$legacy` from the sample, no prompt, log shows hash size 8;

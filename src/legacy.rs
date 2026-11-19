@@ -185,8 +185,8 @@ pub fn candidates(toc: EIoStoreTocVersion, header: Option<EIoContainerHeaderVers
 }
 
 /// Narrows the candidates with the shader hash size seen in the container headers (8 bytes
-/// only from UE 5.8 on), then drops 5.8 when 5.7 is still in: packages are the same in both
-/// (object version 1018), so the pick can't change the output.
+/// only from UE 5.8 on). 5.7 and 5.8 share the object version (1018) but not the legacy
+/// import layout (5.8 writes `PackageName` in cooked imports), so both stay when it's unknown.
 pub fn refine(cands: Vec<EngineVersion>, shader_hash_size: Option<usize>) -> Vec<EngineVersion> {
     let mut c = cands;
     if let Some(size) = shader_hash_size {
@@ -195,10 +195,34 @@ pub fn refine(cands: Vec<EngineVersion>, shader_hash_size: Option<usize>) -> Vec
             c = fit;
         }
     }
-    if c.contains(&EngineVersion::UE5_7) {
-        c.retain(|v| *v != EngineVersion::UE5_8);
-    }
     c
+}
+
+fn is_5_8(v: Option<EngineVersion>) -> bool {
+    v.is_some_and(|v| v >= EngineVersion::UE5_8)
+}
+
+/// Custom versions whose values were bumped between UE 5.7 and 5.8, with their 5.7 value
+/// (measured on the 5.7/5.8 samples: 5.7 = 61/121/225, 5.8 = 68/123/268; 5.6 = 56/121/207).
+const MARKERS_5_7: [([u32; 4], i32); 3] = [
+    ([0xD89B5E42, 0x24BD4D46, 0x8412ACA8, 0xDF641779], 61),  // FUE5ReleaseStreamObjectVersion
+    ([0x697DD581, 0xE64F41AB, 0xAA4A51EC, 0xBEB7B628], 121), // FUE5MainStreamObjectVersion
+    ([0x601D1886, 0xAC644F84, 0xAA16D3DE, 0x0DEAC7D6], 225), // FFortniteMainBranchObjectVersion
+];
+
+/// Whether a versioned package was saved by UE 5.8 or later (`None`: none of the markers).
+pub fn saved_by_5_8(custom_versions: &[(retoc::FGuid, i32)]) -> Option<bool> {
+    for (words, v57) in MARKERS_5_7 {
+        let mut b = [0u8; 16];
+        for (i, w) in words.iter().enumerate() {
+            b[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        let guid = retoc::FGuid::from_bytes(b);
+        if let Some((_, v)) = custom_versions.iter().find(|(k, _)| *k == guid) {
+            return Some(*v > v57);
+        }
+    }
+    None
 }
 
 /// retoc's heuristic picks one version by itself (5.1/5.2 are told apart per package).
@@ -241,7 +265,8 @@ fn decide_quietly(opts_version: Option<EngineVersion>, utoc: &Path, cands: &[Eng
         }
     }
     if heuristic_suffices(cands) {
-        return Some(Decision::Use(None));
+        // retoc's heuristic finds the package version; 5.8 must still be named for the imports
+        return Some(Decision::Use(if cands.len() == 1 && is_5_8(Some(cands[0])) { Some(cands[0]) } else { None }));
     }
     None
 }
@@ -431,12 +456,14 @@ fn guarded<T>(f: impl FnOnce() -> anyhow::Result<T>) -> Result<T, LegacyError> {
 
 pub struct Session {
     // declared first: dropped before the store and log it borrows
-    ctx: Option<(Option<EngineVersion>, FZenPackageContext<'static>)>,
+    ctx: Option<((Option<EngineVersion>, bool), FZenPackageContext<'static>)>,
     log: Box<Log>,
     cells: Arc<ZenScriptCellsStore>,
     store: Arc<Store>,
     utoc: PathBuf,
     decision: Decision,
+    /// From a versioned package's custom versions: saved by 5.8+ or not.
+    known_5_8: Option<bool>,
     package: Option<(u32, HashMap<Part, Vec<u8>>)>,
     shader: Option<(u32, Vec<u8>, Vec<u8>)>,
 }
@@ -451,13 +478,16 @@ impl Session {
             store,
             utoc: current.to_path_buf(),
             decision: Decision::Undecided,
+            known_5_8: None,
             package: None,
             shader: None,
         })
     }
 
-    fn context(&mut self, version: Option<EngineVersion>) -> &FZenPackageContext<'static> {
-        if self.ctx.as_ref().is_none_or(|(v, _)| *v != version) {
+    /// `version`: fallback package version (`None`: retoc's heuristic); `is_5_8`: write UE 5.8's
+    /// cooked import layout.
+    fn context(&mut self, version: Option<EngineVersion>, is_5_8: bool) -> &FZenPackageContext<'static> {
+        if self.ctx.as_ref().is_none_or(|(k, _)| *k != (version, is_5_8)) {
             self.ctx = None;
             // SAFETY: the backend lives in `self.store` (an Arc, never replaced) and the log in
             // `self.log` (a Box, never replaced); `ctx` is declared first, so it is dropped
@@ -465,31 +495,49 @@ impl Session {
             let backend: &'static dyn IoStoreTrait = unsafe { &*(self.store.backend.as_ref() as *const dyn IoStoreTrait) };
             let log: &'static Log = unsafe { &*(self.log.as_ref() as *const Log) };
             let fallback = version.map(|v| v.package_file_version());
-            dlog!("  legacy: package context, engine version {}", version.map(version_ini_name).unwrap_or("Auto"));
-            self.ctx = Some((version, FZenPackageContext::create(backend, fallback, log, Some(self.cells.clone()))));
+            dlog!("  legacy: package context, engine version {}, 5.8 imports {is_5_8}", version.map(version_ini_name).unwrap_or("Auto"));
+            let engine = if is_5_8 { Some(EngineVersion::UE5_8) } else { None };
+            let ctx = FZenPackageContext::create(backend, fallback, log, Some(self.cells.clone())).with_engine_version(engine);
+            self.ctx = Some(((version, is_5_8), ctx));
         }
         &self.ctx.as_ref().unwrap().1
     }
 
-    /// Engine version for this package; asks when the heuristic can't decide and the
-    /// package carries no versions.
-    fn version_for(&mut self, c: &Container, chunk: u32, ini: Option<EngineVersion>) -> Result<Option<EngineVersion>, LegacyError> {
+    /// Fallback package version (`None`: retoc's heuristic) and whether to write UE 5.8's import
+    /// layout, for this package. Asks only when neither the container nor the package tells.
+    fn version_for(&mut self, c: &Container, chunk: u32, ini: Option<EngineVersion>) -> Result<(Option<EngineVersion>, bool), LegacyError> {
         if let Decision::Use(v) = self.decision {
-            return Ok(v);
+            return Ok((v, is_5_8(v)));
         }
-        let cands = refine(candidates(self.store.toc, self.store.header), self.store.shader_hash_size);
+        let mut cands = refine(candidates(self.store.toc, self.store.header), self.store.shader_hash_size);
+        if let Some(k) = self.known_5_8 {
+            let narrowed: Vec<_> = cands.iter().copied().filter(|v| (*v >= EngineVersion::UE5_8) == k).collect();
+            if !narrowed.is_empty() {
+                cands = narrowed;
+            }
+        }
         if let Some(d) = decide_quietly(ini, &self.utoc, &cands, self.store.header) {
             self.decision = d;
             let Decision::Use(v) = d else { unreachable!() };
-            return Ok(v);
+            return Ok((v, is_5_8(v)));
         }
-        if self.store.header.is_some_and(|h| h > EIoContainerHeaderVersion::Initial) && has_versioning_info(c, chunk) {
-            // versioned packages don't need it; decide when an unversioned one comes
-            return Ok(None);
+        let mixed = cands.iter().any(|v| *v >= EngineVersion::UE5_8) && cands.iter().any(|v| *v < EngineVersion::UE5_8);
+        if let Some(header) = self.store.header.filter(|h| *h > EIoContainerHeaderVersion::Initial) {
+            if let Some(custom) = versioning_info(c, chunk, header) {
+                if !mixed {
+                    // the package's own versions cover the package version; layout is the same for all
+                    return Ok((None, cands.first().is_some_and(|v| *v >= EngineVersion::UE5_8)));
+                }
+                if let Some(k) = saved_by_5_8(&custom) {
+                    dlog!("  legacy: versioned package saved by {} (custom versions)", if k { "UE 5.8+" } else { "UE 5.7 or older" });
+                    self.known_5_8 = Some(k);
+                    return self.version_for(c, chunk, ini);
+                }
+            }
         }
-        let v = ask(&self.utoc, &cands, ini, self.store.shader_hash_size.is_none())?;
+        let v = ask(&self.utoc, &cands, ini)?;
         self.decision = Decision::Use(Some(v));
-        Ok(Some(v))
+        Ok((Some(v), is_5_8(Some(v))))
     }
 
     /// File `part` of the package at `chunk` (converted once, then served from memory).
@@ -497,11 +545,11 @@ impl Session {
         if self.package.as_ref().is_none_or(|(i, _)| *i != chunk) {
             self.package = None;
             let info = c.chunk(chunk).map_err(|e| LegacyError::Failed(e.to_string()))?;
-            let version = self.version_for(c, chunk, ini)?;
+            let (version, layout_5_8) = self.version_for(c, chunk, ini)?;
             let id = FPackageId(info.id.id64());
             let out = Collect(Mutex::new(Vec::new()));
             let started = std::time::Instant::now();
-            let ctx = self.context(version);
+            let ctx = self.context(version, layout_5_8);
             guarded(|| build_legacy_without_bulk_data(ctx, id, UEPath::new(path), &out))?;
             let mut files = HashMap::new();
             for (p, data) in out.0.into_inner().unwrap_or_else(|e| e.into_inner()) {
@@ -546,17 +594,15 @@ impl Session {
     }
 }
 
-/// UE5 Zen package summary starts with `bHasVersioningInfo` (u32).
-fn has_versioning_info(c: &Container, chunk: u32) -> bool {
-    let Ok(mut r) = c.open_chunk(chunk) else { return false };
-    match r.next_piece() {
-        Ok(Some(p)) if p.len() >= 4 => u32::from_le_bytes([p[0], p[1], p[2], p[3]]) != 0,
-        _ => false,
-    }
+/// Custom versions of a versioned package (`None`: unversioned or unreadable).
+fn versioning_info(c: &Container, chunk: u32, header: EIoContainerHeaderVersion) -> Option<Vec<(retoc::FGuid, i32)>> {
+    let mut r = c.open_chunk(chunk).ok()?;
+    let first = r.next_piece().ok()??;
+    let info = std::panic::catch_unwind(AssertUnwindSafe(|| retoc::zen::read_zen_package_versioning_info(&mut Cursor::new(&first), header))).ok()?.ok()??;
+    Some(info.custom_versions.iter().map(|v| (v.key, v.version)).collect())
 }
 
-/// `merged_58`: no shader hashes seen, so "5.7" stands for 5.7 and 5.8 (same packages).
-fn ask(utoc: &Path, cands: &[EngineVersion], ini: Option<EngineVersion>, merged_58: bool) -> Result<EngineVersion, LegacyError> {
+fn ask(utoc: &Path, cands: &[EngineVersion], ini: Option<EngineVersion>) -> Result<EngineVersion, LegacyError> {
     let _one = PROMPT.lock().unwrap_or_else(|e| e.into_inner());
     // another thread may have picked meanwhile
     if let Some((u, v)) = SESSION_PICK.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
@@ -565,12 +611,8 @@ fn ask(utoc: &Path, cands: &[EngineVersion], ini: Option<EngineVersion>, merged_
         }
     }
     let list: Vec<EngineVersion> = if cands.is_empty() { VERSIONS.iter().map(|x| x.0).collect() } else { cands.to_vec() };
-    let ini_in_list = ini.map(|v| if merged_58 && v == EngineVersion::UE5_8 && !list.contains(&v) { EngineVersion::UE5_7 } else { v });
-    let selected = ini_in_list.and_then(|v| list.iter().position(|x| *x == v)).unwrap_or(list.len() - 1);
-    let labels: Vec<&str> = list
-        .iter()
-        .map(|v| if merged_58 && *v == EngineVersion::UE5_7 && !list.contains(&EngineVersion::UE5_8) { "UE 5.7 / 5.8" } else { version_label(*v) })
-        .collect();
+    let selected = ini.and_then(|v| list.iter().position(|x| *x == v)).unwrap_or(list.len() - 1);
+    let labels: Vec<&str> = list.iter().map(|v| version_label(*v)).collect();
     dlog!("  legacy: asking for the engine version ({labels:?})");
     let Some(a) = dialog::prompt_version(&dialog::VersionPrompt { container: utoc, choices: &labels, selected, known: !cands.is_empty() }) else {
         dlog!("  legacy: version prompt cancelled");
@@ -610,8 +652,8 @@ mod tests {
         assert_eq!(candidates(T::OnDemandMetaData, Some(H::NoExportInfo)), [EngineVersion::UE5_4]);
         let late = candidates(T::ReplaceIoChunkHashWithIoHash, Some(H::SoftPackageReferencesOffset));
         assert_eq!(late, [EngineVersion::UE5_6, EngineVersion::UE5_7, EngineVersion::UE5_8]);
-        // no shader maps: 5.7 stands for 5.8 too (same packages)
-        assert_eq!(refine(late.clone(), None), [EngineVersion::UE5_6, EngineVersion::UE5_7]);
+        // no shader maps: all three (5.8 differs from 5.7 in the legacy import layout)
+        assert_eq!(refine(late.clone(), None), late);
         assert!(!heuristic_suffices(&refine(late.clone(), None)));
         // 8-byte shader hashes: 5.8, no prompt
         assert_eq!(refine(late.clone(), Some(8)), [EngineVersion::UE5_8]);
@@ -620,6 +662,21 @@ mod tests {
         assert_eq!(refine(late, Some(20)), [EngineVersion::UE5_6, EngineVersion::UE5_7]);
         // older engines are unaffected
         assert_eq!(refine(candidates(T::OnDemandMetaData, Some(H::NoExportInfo)), Some(20)), [EngineVersion::UE5_4]);
+    }
+
+    #[test]
+    fn custom_version_markers() {
+        let release = |v| {
+            let mut b = [0u8; 16];
+            for (i, w) in [0xD89B5E42u32, 0x24BD4D46, 0x8412ACA8, 0xDF641779].iter().enumerate() {
+                b[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+            }
+            (retoc::FGuid::from_bytes(b), v)
+        };
+        assert_eq!(saved_by_5_8(&[release(68)]), Some(true));
+        assert_eq!(saved_by_5_8(&[release(61)]), Some(false));
+        assert_eq!(saved_by_5_8(&[release(56)]), Some(false));
+        assert_eq!(saved_by_5_8(&[]), None);
     }
 
     #[test]
