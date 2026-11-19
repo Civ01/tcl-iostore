@@ -39,6 +39,9 @@ pub struct Options {
     pub debug_log: bool,
     /// `LegacyEngineVersion`: engine version for unversioned packages in `$legacy`; `None` = Auto.
     pub legacy_engine_version: Option<retoc::version::EngineVersion>,
+    /// `LegacyGuessScriptTypes`: name engine structs/enums in `$legacy` imports by a name guess
+    /// instead of `Object` (a wrong guess makes the legacy loader fail that import).
+    pub legacy_guess_script_types: bool,
     /// Problems found while parsing (logged; invalid values keep defaults).
     pub warnings: Vec<String>,
 }
@@ -53,6 +56,7 @@ impl Default for Options {
             virtual_folder_attr: ATTR_HIDDEN,
             debug_log: false,
             legacy_engine_version: None,
+            legacy_guess_script_types: false,
             warnings: vec![],
         }
     }
@@ -248,6 +252,7 @@ pub fn parse_options(text: &str) -> Options {
             "mountfolderattr" => opts.mount_folder_attr = parse_attr_list(raw),
             "virtualfolderattr" => opts.virtual_folder_attr = parse_attr_list(raw),
             "debuglog" => opts.debug_log = parse_bool(raw).unwrap_or(false),
+            "legacyguessscripttypes" => opts.legacy_guess_script_types = parse_bool(raw).unwrap_or(false),
             "legacyengineversion" => match crate::legacy::parse_version(raw) {
                 Ok(v) => opts.legacy_engine_version = v,
                 Err(()) => bad(&key),
@@ -283,6 +288,8 @@ mod tests {
         assert!(!parse_options("[Other]\nDebugLog=1").debug_log);
         assert_eq!(parse_options("[Options]\nLegacyEngineVersion=UE5_7").legacy_engine_version, Some(retoc::version::EngineVersion::UE5_7));
         assert_eq!(parse_options("[Options]\nLegacyEngineVersion=Auto").legacy_engine_version, None);
+        assert!(!parse_options("[Options]").legacy_guess_script_types);
+        assert!(parse_options("[Options]\nLegacyGuessScriptTypes=1").legacy_guess_script_types);
     }
 
     #[test]

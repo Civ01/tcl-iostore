@@ -597,7 +597,7 @@ fn process_legacy(arc: &mut Archive, op: c_int, dest: Option<PathBuf>, display: 
         }
         let Some(global) = arc.global.clone() else { return E_BAD_DATA };
         let utoc = arc.container.utoc_path().to_path_buf();
-        match Session::open(&global, &utoc) {
+        match Session::open(&global, &utoc, arc.legacy_guess_script_types) {
             Ok(s) => arc.legacy = Some(s),
             Err(e) => {
                 let msg = match e {

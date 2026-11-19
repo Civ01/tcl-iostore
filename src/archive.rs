@@ -67,6 +67,7 @@ pub struct Archive {
     pub legacy_declined: bool,
     /// `LegacyEngineVersion` when the archive was opened (`None` = Auto).
     pub legacy_version: Option<retoc::version::EngineVersion>,
+    pub legacy_guess_script_types: bool,
 }
 
 /// Rejects entry names that would escape the destination folder.
@@ -95,6 +96,7 @@ impl Archive {
             legacy_error: None,
             legacy_declined: false,
             legacy_version: options.legacy_engine_version,
+            legacy_guess_script_types: options.legacy_guess_script_types,
         }
     }
 

@@ -26,7 +26,7 @@ real Windows is open (§13).
 | # | Goal | Scope | Size | Notes |
 |---|---|---|---|---|
 | N1 | **Packing, raw** | Raw Zen files into containers: replace/delete in existing containers, new patch containers from game files; writer in `iostore` | large | **Spec'd 2026-11-19, §6b.** Replace-only first; **N1b (highest backburner): replace with addition** (new packages) |
-| N2 | **Packing, legacy input** | Legacy `.uasset/.uexp/.ubulk` converted to Zen on pack (retoc `to-zen`), auto-detected, else asked once per copy session **[decided]** | large | Needs the global's script objects (already mandatory) and an engine version for the target |
+| N2 | **Packing, legacy input** | Legacy `.uasset/.uexp/.ubulk` converted to Zen on pack (retoc `to-zen`), auto-detected, else asked once per copy session **[decided]** | large | Needs the global's script objects (already mandatory) and an engine version for the target; Zen header-size field per version (§6a.2) |
 | N3 | **Legacy conversion on extract** | Hidden `$legacy` folder: Zen packages as legacy `.uasset/.uexp/.ubulk…`, rebuilt shader libraries, `scriptobjects.bin` (retoc `to-legacy`) | medium | Done, incl. N3b (UE 5.8 shader hashes, §6a.1) |
 | N4 | **Custom game support** | Game profiles ported from CUE4Parse (keys, custom encryption, block layouts, magics); per-folder profile, offered on a read failure **[decided]** | medium per game | Hook in place (§2.2); needs the user's game-specific samples |
 | N5 | **TOC v9/v10** | `AddedSourceHashes`, `ContainerEncryptionMethod` (AES-CTR) | small | When a released engine writes them; CUE4Parse reads them |
@@ -311,7 +311,7 @@ IoStore-library version change (CUE4Parse keys it on `GAME_UE5_8`). It affects:
   identical after decompression; `tools/shaderlib_compare.py`); `.uexp` byte-identical to the
   `.pak`; `.uasset` equivalent but not byte-identical. After the PackageName fix the import maps match the
   engine's except retoc's class name `Object` for imports of script functions/structs (engine:
-  `Function`/`ScriptStruct`; script objects carry no class), plus the saved package hash, name
+  `Function`/`ScriptStruct`; script objects carry no class; functions fixed in §6a.2), plus the saved package hash, name
   hashes, package source CRC and fewer preload dependencies (BP_SML: 127 vs 205) — all versions,
   Zen drops or retoc approximates them; asset info lists only
   packages present in the containers (engine also lists plugin materials and global "None"
@@ -343,6 +343,49 @@ Plan:
 a chunk-data hook so its reads go through the `iostore` crate (partitions, AES, Oodle from
 `deps\`, one code path) and a backend built from a chosen list of containers. No `.pak` writing
 (repak) is linked into the plugin for this.
+
+### 6a.2 Review of the fork against UE 5.8 **[2026-11-19]**
+Sample `5.8_samples_full_same_asset.7z` (SML mod, 16 packages; versioned = tagged properties and
+unversioned containers, each with the engine's own cook of `BP_SML`), compared with an independent
+header parser written from the UE 5.8.4 source. 5.8 changed no Zen/IoStore format version (TOC v8,
+container header v5, Zen package v3, export map, script objects). `.uexp` byte-identical.
+
+Fixed (retoc fork 66f361d, plugin uses it):
+- **Script import classes** (all versions): retoc wrote `Object` for every script import that is
+  not a package, class or CDO. Now `Function` inside a native class and for top-level
+  `*__DelegateSignature`. Top-level structs/enums stay `Object` by default: Zen doesn't say which,
+  the legacy loader finds native imports by class (`FindImportFast(class, outer, name)`), so a wrong
+  guess fails the import while `Object` always matches, and the obvious name rule (`E` + uppercase =
+  enum) is wrong for real engine enums (`ACLCompressionLevel`, `TextureGroup`, …) and structs
+  (`FEQS…`). `[Options] LegacyGuessScriptTypes=1` turns the name guess on (better for viewers).
+  BP_SML: imports match the engine except the 5 top-level structs; all match with the guess.
+- **`bIsAsset`** (all versions): UE's rule (`UObject::IsAsset`): top-level, `RF_Public`, not CDO or
+  transient, not a plain `UClass` (Blueprint/Verse classes override `UClass::IsAsset`). retoc also
+  required `Standalone|Transactional`, so every Blueprint class asset had 0 (15 of 16 packages).
+
+Not changed, with the reason (UE 5.8.4 source):
+- **`PackageSource`** = `FCrc::StrCrc_DEPRECATED(upper(file base name))` (2-byte chars; verified).
+  Not read by `FLinkerLoad`, the Zen loader or `UPackage`; shipping editors even write a random
+  value. No effect on loading; can be filled exactly if wanted.
+- **`SavedHash`** = BLAKE3-160 of `.uasset` + `.uexp` without the 4-byte footer, field zeroed
+  (verified). Only copied into `UPackage` in editor builds (`WITH_EDITORONLY_DATA`); not checked.
+  No effect on loading; can be computed over our own output.
+- **`ScriptSerializationStart/EndOffset`** (only packages with tagged properties, i.e. without
+  `PKG_UnversionedProperties`; the Zen loader never sees them): retoc writes `(0, SerialSize)`; the
+  engine writes the tagged-property range (BP_SML class 0–38 of 1105, functions 0–9).
+  `FLinkerLoad::MarkScriptSerializationStart/End` `checkf` these against the real positions, so
+  loading such a file through the legacy loader asserts in builds with checks (editor,
+  Debug/Development games running legacy .paks); Shipping/Test builds compile the check out and
+  only the editor's property-bag path uses the values. Fix = scan the tag stream for its `None`
+  terminator (tags carry their size); later.
+- **Zen `_Unused` (was CookedHeaderSize)**: UE ≤5.6 stores the legacy header size; 5.7.0–5.7.4
+  store size − 8; 5.8 size − 8 − 8 × imports (PackageStoreOptimizer.cpp, frozen to keep patches
+  small). retoc treats it as the size: harmless for `$legacy` (padding only); N2 must write the
+  version's formula.
+- Inherent Zen losses: preload dependencies on script objects (BP_SML 205 → 127; retoc adds its own
+  class/template entries), name order, NamesReferencedFromExportDataCount over-counted (safe).
+- Backburner (retoc CLI): `--version UE5_8` help text ("same formats as 5.7"); a single `.utoc`
+  without its global fails with "does not contain ScriptObjects" (pass the folder).
 
 ## 6b. Packing raw Zen files (N1) **[decided 2026-11-19]**
 Input is what the plugin extracts raw (directory-index files, `$chunks` files). Reference checked:
@@ -431,6 +474,7 @@ MountPoint=Folder           ; Folder | Root
 MountFolderAttr=Hidden
 VirtualFolderAttr=Hidden    ; attribute of $chunks and $legacy
 LegacyEngineVersion=Auto    ; Auto | UE4_27 | UE5_0 … UE5_8 (§6a)
+LegacyGuessScriptTypes=0    ; 1 = ScriptStruct/Enum by name for top-level script imports (§6a.2)
 [Pack] (N1, §6b)
 PackMode=ReplaceOnly        ; ReplaceOnly | ReplaceWithAddition (later: N1b; acts as ReplaceOnly)
 Compression=Match           ; Match | None | Zlib | Gzip | LZ4 | Oodle (+ level settings)
@@ -467,6 +511,8 @@ All in the new `iostore` crate (§2.1) **[done]**:
    compression method (TOCs naming it failed to parse in retoc), workspace `oodle_loader`/`repak`
    from Civ01/repak without download (`retoc_cli` turns download back on). retoc's own
    `test_zen_asset_identity_conversion` fails on `master` too (test files missing).
+9. UE 5.8 and legacy fixes in the `retoc` crate: 8-byte shader hashes (7346193), cooked import
+   `PackageName` (195bf45), script import classes + `bIsAsset` (66f361d), §6a.1/§6a.2.
    Measured: ~1 GB/s read + Oodle + hash (warm cache); 81 MB peak while reading a 3.5 GB chunk.
 
 ## 12. Testing

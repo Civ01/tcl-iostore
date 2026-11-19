@@ -462,6 +462,8 @@ pub struct Session {
     store: Arc<Store>,
     utoc: PathBuf,
     decision: Decision,
+    /// `LegacyGuessScriptTypes`.
+    guess_script_types: bool,
     /// From a versioned package's custom versions: saved by 5.8+ or not.
     known_5_8: Option<bool>,
     package: Option<(u32, HashMap<Part, Vec<u8>>)>,
@@ -469,7 +471,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn open(global: &Path, current: &Path) -> Result<Session, LegacyError> {
+    pub fn open(global: &Path, current: &Path, guess_script_types: bool) -> Result<Session, LegacyError> {
         let store = store_for(global, current).map_err(LegacyError::Failed)?;
         Ok(Session {
             ctx: None,
@@ -478,6 +480,7 @@ impl Session {
             store,
             utoc: current.to_path_buf(),
             decision: Decision::Undecided,
+            guess_script_types,
             known_5_8: None,
             package: None,
             shader: None,
@@ -497,7 +500,7 @@ impl Session {
             let fallback = version.map(|v| v.package_file_version());
             dlog!("  legacy: package context, engine version {}, 5.8 imports {is_5_8}", version.map(version_ini_name).unwrap_or("Auto"));
             let engine = if is_5_8 { Some(EngineVersion::UE5_8) } else { None };
-            let ctx = FZenPackageContext::create(backend, fallback, log, Some(self.cells.clone())).with_engine_version(engine);
+            let ctx = FZenPackageContext::create(backend, fallback, log, Some(self.cells.clone())).with_engine_version(engine).with_script_type_class_guess(self.guess_script_types);
             self.ctx = Some(((version, is_5_8), ctx));
         }
         &self.ctx.as_ref().unwrap().1

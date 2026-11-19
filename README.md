@@ -16,6 +16,8 @@ decisions: [SPEC.md](SPEC.md).
   resolved across every container under the global's folder. For unversioned packages
   whose engine version the container can't tell (UE 5.6+), a dialog asks once
   (`LegacyEngineVersion` in `uetoc.ini`).
+  Imports of engine structs and enums are written with class `Object` (always
+  loadable); `LegacyGuessScriptTypes=1` names them by a guess instead (nicer in viewers).
 - **`.utoc`**: shows one text file, `<ContainerId>.txt`, describing the header, container
   header, signatures and every chunk (fixed-width tables for Lister's monospace font). Set
   `OpenUtocAsVirtualFile=0` to open `.utoc` files like the `.ucas`.
