@@ -25,7 +25,7 @@ real Windows is open (§13).
 ### Next goals (candidates, to be ordered with the user)
 | # | Goal | Scope | Size | Notes |
 |---|---|---|---|---|
-| N1 | **Packing, raw** | New container from raw Zen files (what we extract), add/replace/delete in existing containers; writer in `iostore` (blocks, compression with levels, padding, perfect hash, container header rebuilt from the Zen package headers); `PK_CAPS_NEW/MODIFY/DELETE`; settings dialog | large | Raw round-trip first: extracted files → container that loads in the game. Same undo/compact ideas as uepak (TOC is small: rewrite it, append to `.ucas`). **No repak/`.pak` writing in this plugin** **[decided 2026-11-19]**: after creating a container from scratch, warn that the game only mounts it together with a same-named `.pak` (make it with uepak), warning switchable off in the ini (`WarnPakNeeded=1`). Merging both plugins is a maybe, much later. Open questions: version/engine selection, encryption on write, signed containers |
+| N1 | **Packing, raw** | Raw Zen files into containers: replace/delete in existing containers, new patch containers from game files; writer in `iostore` | large | **Spec'd 2026-11-19, §6b.** Replace-only first; **N1b (highest backburner): replace with addition** (new packages) |
 | N2 | **Packing, legacy input** | Legacy `.uasset/.uexp/.ubulk` converted to Zen on pack (retoc `to-zen`), auto-detected, else asked once per copy session **[decided]** | large | Needs the global's script objects (already mandatory) and an engine version for the target |
 | N3 | **Legacy conversion on extract** | Hidden `$legacy` folder: Zen packages as legacy `.uasset/.uexp/.ubulk…`, rebuilt shader libraries, `scriptobjects.bin` (retoc `to-legacy`) | medium | Done, incl. N3b (UE 5.8 shader hashes, §6a.1) |
 | N4 | **Custom game support** | Game profiles ported from CUE4Parse (keys, custom encryption, block layouts, magics); per-folder profile, offered on a read failure **[decided]** | medium per game | Hook in place (§2.2); needs the user's game-specific samples |
@@ -336,6 +336,72 @@ a chunk-data hook so its reads go through the `iostore` crate (partitions, AES, 
 `deps\`, one code path) and a backend built from a chosen list of containers. No `.pak` writing
 (repak) is linked into the plugin for this.
 
+## 6b. Packing raw Zen files (N1) **[decided 2026-11-19]**
+Input is what the plugin extracts raw (directory-index files, `$chunks` files). Reference checked:
+UnrealReZen (only patches packages that exist in the game: finds each file by path in the game's
+containers, reuses its chunk ID and container-header store entry, skips the rest; writes a fixed
+empty `.pak` next to its container).
+
+**What may be packed** **[decided]**
+- `PackMode=ReplaceOnly` (default; the only implemented mode): every file must exist in the game
+  with the same path (mount point + path): in the target container, else in any container under the
+  global's folder (the legacy view's store). Its chunk ID and, for packages, its store entry
+  (imported packages, shader map hashes) are reused unchanged. The new data replaces the chunk.
+- `PackMode=ReplaceWithAddition`: **dummy for now** (accepted in ini and dialog, behaves as
+  ReplaceOnly, logged). Backburner **N1b, highest priority**: new packages, chunk ID from the
+  package name, store entry derived (5.3+ imports from the Zen header; no shader maps, warning).
+- **Refused, whole copy cancelled, one message listing the files** **[decided]**:
+  - files the game doesn't have (ReplaceOnly);
+  - files that live in the companion `.pak`, not in IoStore (`.ini`, `.locres`, `AssetRegistry.bin`,
+    `.uplugin`, `.uproject`, …: anything that isn't a package, bulk file or shader library);
+  - legacy cooked files (`.uasset` with the legacy magic, or `.uasset` + `.uexp`): N2;
+  - anything into `$legacy` (read-only view) or into the global container **[proposed]**.
+- `$chunks` files are matched by chunk ID (file name); `ContainerHeader` is never taken from input
+  (always rebuilt) **[proposed]**.
+- Delete (F8): directory-index files and `$chunks` files (not `ContainerHeader`); a deleted package
+  loses its store entry **[proposed]**.
+
+**Changing an existing container** **[decided: like uepak]**: new data appended to the `.ucas` (last
+partition; a new `_sN` partition when the partition size would be exceeded), `.utoc` rewritten
+(small); undo copy `<name>.utoc.uetoc-undo` with the old `.utoc` and the old partition lengths;
+rollback on error/cancel/panic, restore offered on next open; `Compact=1` rebuilds into a new pair
+(drops dead space), `AutoCompactUnder` (default 10 MB) always rebuilds small containers;
+`UndoLimit`; free-space check; per-container busy guard + cross-process lock (as uepak).
+- Encrypted containers: confirmation, key from the read lookup, new blocks and the rewritten index
+  encrypted with it (uepak rule) **[proposed]**.
+- **Signed containers** **[decided]**: confirmation that the game may reject an unsigned container;
+  then written unsigned (flag and signature data removed).
+
+**New container from scratch** (Alt+F5 to a `.ucas`/`.utoc` that doesn't exist)
+- Format taken from the game (the global and the other containers in its folder): TOC version,
+  container-header version, shader hash size; container ID = UE's (CityHash64 of the lowercase
+  container name) **[proposed]**; mount point from the Configure dialog (default `../../../`), paths
+  as TC gives them **[proposed]**; unencrypted, unsigned (uepak rule) **[proposed]**.
+- **Companion `.pak`** **[decided]**: offered only here (checkbox in the pack settings, ini
+  `WriteEmptyPak=1`): an empty `.pak` (empty index + footer, ~250 bytes, written by our own code, no
+  repak) named like the container, if none exists. Pak version **11** for every engine 4.27–5.8
+  (every reader accepts older pak versions; 11 = 4.26+). When off, `WarnPakNeeded=1` warns instead.
+- Name: no `_P` check (user's business) **[decided]**.
+
+**Compression** **[decided: match the game]**: the method of the container being changed; for a new
+container, the method most used by the game's other containers (None when they're uncompressed);
+override in the Configure dialog (None/Zlib/Gzip/LZ4/Oodle with levels, block size; Zstd not offered:
+UE has no Zstd format, §6a.1 note). Store-if-not-smaller per block **[proposed]**.
+
+**Writer** (`iostore` crate) **[proposed]**: TOC v3/5/6/8, chunk hashes (SHA-1 ≤ v3, BLAKE3/20
+later), blocks with compression + AES-ECB padding as UE, perfect-hash chunk table (v4+; UE's
+algorithm), directory index (encrypted when the container is), partitions, meta flags, TOC
+signature data dropped. Container header (de)serialized with the fork's `retoc::container_header`.
+
+**Configure dialog** (packing part) **[proposed]**: compression (Match game / methods + level),
+block size, PackMode (ReplaceOnly / ReplaceWithAddition — "later"), Compact, AutoCompactUnder,
+UndoLimit, WriteEmptyPak, mount point for new containers, WarnPakNeeded.
+
+**Tests** **[proposed]**: round trips on every sample (extract raw → replace all → container reads
+back chunk-for-chunk identical; container header store entries unchanged); modify/undo/rollback/
+compact as uepak; encrypted 4.27 and The Isle; the empty `.pak` read by repak; TC check of the new
+pieces only; a game load test by the user (patch container + empty `.pak`).
+
 ## 7. AES keys **[decided]**: own file
 `uetoc.keys.json` in the settings directory, same format, lookup order (folder/parent folder →
 same non-zero GUID → dialog), dialog, "session only" checkbox and changed-key wording as uepak
@@ -357,7 +423,12 @@ MountPoint=Folder           ; Folder | Root
 MountFolderAttr=Hidden
 VirtualFolderAttr=Hidden    ; attribute of $chunks and $legacy
 LegacyEngineVersion=Auto    ; Auto | UE4_27 | UE5_0 … UE5_8 (§6a)
-WarnPakNeeded=1             ; N1: warn after creating a container from scratch
+[Pack] (N1, §6b)
+PackMode=ReplaceOnly        ; ReplaceOnly | ReplaceWithAddition (later: N1b; acts as ReplaceOnly)
+Compression=Match           ; Match | None | Zlib | Gzip | LZ4 | Oodle (+ level settings)
+WriteEmptyPak=1             ; new containers: write an empty companion .pak
+WarnPakNeeded=1             ; when WriteEmptyPak=0: warn that a .pak is needed
+Compact=0 / AutoCompactUnder=10M / UndoLimit=1G / MountPoint=../../../
 DebugLog=0
 ```
 No settings dialog in phase 1 **[proposed]**; `ConfigurePacker` opens a message box naming the
