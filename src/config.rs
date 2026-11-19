@@ -3,6 +3,7 @@
 //! The settings directory is the plugin's own directory when it is writable,
 //! otherwise the directory of TC's suggested ini (next to wincmd.ini), as in tcl-uepak.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
@@ -215,41 +216,79 @@ pub fn load_options() -> Options {
 /// Sets `[Options] key=value` in the settings directory's ini, keeping everything else
 /// (a shipped default in the plugin folder is copied first).
 pub fn set_option(key: &str, value: &str) -> std::io::Result<()> {
+    set_values("Options", &[(key, value.to_string())]).map(|_| ())
+}
+
+/// Sets several `key=value` lines of one section in the settings directory's ini (as
+/// `set_option`). Returns the file written.
+pub fn set_values(section: &str, values: &[(&str, String)]) -> std::io::Result<PathBuf> {
     let dir = settings_dir().ok_or_else(|| std::io::Error::other("no settings folder"))?;
     let path = dir.join(INI_NAME);
-    let text = match std::fs::read_to_string(&path) {
+    let mut text = match std::fs::read_to_string(&path) {
         Ok(t) => t,
         Err(_) => ini_path().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default(),
     };
-    std::fs::write(&path, set_option_text(&text, key, value))
+    for (k, v) in values {
+        text = set_value_text(&text, section, k, v);
+    }
+    std::fs::write(&path, text)?;
+    Ok(path)
 }
 
 pub fn set_option_text(text: &str, key: &str, value: &str) -> String {
+    set_value_text(text, "Options", key, value)
+}
+
+/// `text` with `[section] key=value` set: the existing line keeps its inline comment (in its
+/// column), a missing key goes at the end of the section, a missing section at the end of the
+/// file.
+pub fn set_value_text(text: &str, section_name: &str, key: &str, value: &str) -> String {
     let norm = |k: &str| k.trim().to_ascii_lowercase().replace('_', "");
     let want = norm(key);
+    let target = section_name.to_ascii_lowercase();
+    // the comment column most `key=value   ; comment` lines use (for a comment that a long
+    // value had pushed right)
+    let mut columns: HashMap<usize, usize> = HashMap::new();
+    for line in text.lines() {
+        if let Some(i) = line.find(" ;").filter(|_| !line.contains('\t') && line.contains('=')) {
+            if line[..i].ends_with(' ') {
+                *columns.entry(i + 1).or_default() += 1;
+            }
+        }
+    }
+    let usual_column = columns.into_iter().max_by_key(|&(c, n)| (n, c)).map(|(c, _)| c);
     let mut out: Vec<String> = Vec::new();
     let mut section = String::new();
-    let mut options_end: Option<usize> = None;
+    let mut section_end: Option<usize> = None;
     let mut done = false;
     for line in text.lines() {
         let t = line.trim();
         if let Some(name) = t.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-            if section == "options" && options_end.is_none() {
-                options_end = Some(out.len());
+            if section == target && section_end.is_none() {
+                section_end = Some(out.len());
             }
             section = name.trim().to_ascii_lowercase();
             out.push(line.to_string());
             continue;
         }
-        if section == "options" && !done && !t.starts_with(';') && !t.starts_with('#') {
+        if section == target && !done && !t.starts_with(';') && !t.starts_with('#') {
             if let Some((k, rest)) = line.split_once('=') {
                 if norm(k) == want {
-                    // keep an inline comment
-                    let comment = match rest.find(';') {
-                        Some(i) if i > 0 && rest[..i].ends_with([' ', '\t']) => &rest[rest[..i].trim_end().len()..],
-                        _ => "",
+                    // keep an inline comment, in its column when the value fits (spaces only)
+                    let head = format!("{}={value}", k.trim_end());
+                    let line_out = match rest.find(';') {
+                        Some(i) if i > 0 && rest[..i].ends_with(' ') && !line.contains('\t') => {
+                            let column = match usual_column {
+                                // pushed right by an earlier long value: back to the usual column
+                                Some(c) if !rest[..i].ends_with("  ") => c,
+                                _ => k.len() + 1 + i,
+                            };
+                            format!("{head:<width$}{}", &rest[i..], width = column.max(head.len() + 1))
+                        }
+                        Some(i) if i > 0 && rest[..i].ends_with([' ', '\t']) => format!("{head}{}", &rest[rest[..i].trim_end().len()..]),
+                        _ => head,
                     };
-                    out.push(format!("{}={value}{comment}", k.trim_end()));
+                    out.push(line_out);
                     done = true;
                     continue;
                 }
@@ -259,7 +298,7 @@ pub fn set_option_text(text: &str, key: &str, value: &str) -> String {
     }
     if !done {
         let line = format!("{key}={value}");
-        match (section == "options", options_end) {
+        match (section == target, section_end) {
             (_, Some(i)) => {
                 // before blank lines that end the section
                 let mut i = i;
@@ -273,7 +312,7 @@ pub fn set_option_text(text: &str, key: &str, value: &str) -> String {
                 if out.last().is_some_and(|l| !l.trim().is_empty()) {
                     out.push(String::new());
                 }
-                out.push("[Options]".into());
+                out.push(format!("[{section_name}]"));
                 out.push(line);
             }
         }
@@ -457,7 +496,7 @@ mod tests {
     #[test]
     fn set_option_keeps_the_rest() {
         let t = set_option_text("; top\n[Options]\nDebugLog=0\nLegacyEngineVersion=Auto    ; c\n\n[Other]\nX=1\n", "LegacyEngineVersion", "UE5_7");
-        assert_eq!(t, "; top\r\n[Options]\r\nDebugLog=0\r\nLegacyEngineVersion=UE5_7    ; c\r\n\r\n[Other]\r\nX=1\r\n");
+        assert_eq!(t, "; top\r\n[Options]\r\nDebugLog=0\r\nLegacyEngineVersion=UE5_7   ; c\r\n\r\n[Other]\r\nX=1\r\n");
         let t = set_option_text("[Options]\nDebugLog=0\n\n[Other]\nX=1", "LegacyEngineVersion", "UE5_6");
         assert_eq!(t, "[Options]\r\nDebugLog=0\r\nLegacyEngineVersion=UE5_6\r\n\r\n[Other]\r\nX=1\r\n");
         assert_eq!(set_option_text("", "A", "1"), "[Options]\r\nA=1\r\n");

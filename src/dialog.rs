@@ -89,6 +89,22 @@ pub fn prompt_version(p: &VersionPrompt) -> Option<VersionAnswer> {
 }
 
 /// Shows the dialog. `None` = cancelled.
+/// The packing settings dialog (ConfigurePacker). `info` is shown at the bottom (file
+/// locations). Returns the accepted form, already validated by `PackForm::to_options`.
+pub fn configure_pack(
+    parent: *mut core::ffi::c_void,
+    form: &crate::pack_settings::PackForm,
+    info: &str,
+) -> Option<crate::pack_settings::PackForm> {
+    #[cfg(test)]
+    {
+        let _ = (parent, form, info);
+        None
+    }
+    #[cfg(not(test))]
+    imp::configure_pack(parent, form, info)
+}
+
 pub fn prompt_key(p: &KeyPrompt) -> Option<KeyAnswer> {
     #[cfg(test)]
     {
@@ -457,6 +473,347 @@ mod imp {
         }
         st.answer
     }
+
+    // ---- packing settings (ConfigurePacker)
+
+    use crate::pack_settings::{
+        PackForm, COMPRESSIONS, MODES, OODLE_COMPRESSORS, OODLE_LEVELS, ZLIB_LEVELS,
+    };
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
+
+    const ID_PMODE: u16 = 300;
+    const ID_PCOMP: u16 = 301;
+    const ID_PZLIB: u16 = 302;
+    const ID_POODLEC: u16 = 303;
+    const ID_POODLEL: u16 = 304;
+    const ID_PCOMPACT: u16 = 305;
+    const ID_PAUTO: u16 = 306;
+    const ID_PWRITEPAK: u16 = 307;
+    const ID_PWARNPAK: u16 = 308;
+    const ID_PMOUNT: u16 = 309;
+    const ID_PINFO: u16 = 310;
+    const ID_PERROR: u16 = 311;
+    const ID_PZLIBLABEL: u16 = 312;
+    const ID_POODLELABEL: u16 = 313;
+    const CBN_SELCHANGE: u32 = 1;
+    const BN_CLICKED: u32 = 0;
+
+    struct PState {
+        form: PackForm,
+        info: Vec<u16>,
+        answer: Option<PackForm>,
+    }
+
+    fn pack_template() -> Vec<u32> {
+        const BUTTON: u16 = 0x80;
+        const EDIT: u16 = 0x81;
+        const STATIC: u16 = 0x82;
+        const COMBOBOX: u16 = 0x85;
+        const SS_NOPREFIX: u32 = 0x80;
+        const ES_AUTOHSCROLL: u32 = 0x80;
+        const CBS_DROPDOWNLIST: u32 = 3;
+        const BS_DEFPUSHBUTTON: u32 = 1;
+        const BS_AUTOCHECKBOX: u32 = 3;
+        const BS_GROUPBOX: u32 = 7;
+        const NONE: u16 = 0xFFFF;
+        let list = CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP;
+        let mut t = Tpl::dialog("UE IoStore plugin: packing settings", 320, 262);
+        // what and how
+        t.item(BUTTON, BS_GROUPBOX, 7, 4, 306, 66, NONE, "Packing");
+        t.item(STATIC, 0, 14, 18, 64, 9, NONE, "&Mode:");
+        t.item(COMBOBOX, list, 80, 16, 226, 80, ID_PMODE, "");
+        t.item(STATIC, 0, 14, 35, 64, 9, NONE, "&Compression:");
+        t.item(COMBOBOX, list, 80, 33, 90, 120, ID_PCOMP, "");
+        t.item(
+            STATIC,
+            0,
+            178,
+            35,
+            70,
+            9,
+            ID_PZLIBLABEL,
+            "&Zlib/Gzip level:",
+        );
+        t.item(COMBOBOX, list, 250, 33, 56, 160, ID_PZLIB, "");
+        t.item(STATIC, 0, 14, 52, 64, 9, ID_POODLELABEL, "&Oodle:");
+        t.item(COMBOBOX, list, 80, 50, 90, 120, ID_POODLEC, "");
+        t.item(COMBOBOX, list, 178, 50, 128, 160, ID_POODLEL, "");
+        // existing containers
+        t.item(
+            BUTTON,
+            BS_GROUPBOX,
+            7,
+            74,
+            306,
+            46,
+            NONE,
+            "Changing a container",
+        );
+        t.item(
+            BUTTON,
+            BS_AUTOCHECKBOX | WS_TABSTOP,
+            14,
+            87,
+            290,
+            10,
+            ID_PCOMPACT,
+            "Re&build after every change (drops the replaced data)",
+        );
+        t.item(
+            STATIC,
+            0,
+            14,
+            103,
+            130,
+            9,
+            NONE,
+            "Rebuild containers &smaller than:",
+        );
+        t.item(
+            EDIT,
+            ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
+            148,
+            101,
+            44,
+            13,
+            ID_PAUTO,
+            "",
+        );
+        t.item(STATIC, 0, 198, 103, 108, 9, NONE, "(e.g. 10M; 0 = never)");
+        // new containers
+        t.item(
+            BUTTON,
+            BS_GROUPBOX,
+            7,
+            124,
+            306,
+            76,
+            NONE,
+            "New container (Alt+F5 to a .ucas that doesn't exist)",
+        );
+        t.item(
+            BUTTON,
+            BS_AUTOCHECKBOX | WS_TABSTOP,
+            14,
+            137,
+            290,
+            10,
+            ID_PWRITEPAK,
+            "Also write an empty companion .&pak (the game mounts the container through it)",
+        );
+        t.item(
+            BUTTON,
+            BS_AUTOCHECKBOX | WS_TABSTOP,
+            26,
+            150,
+            278,
+            10,
+            ID_PWARNPAK,
+            "&Warn that a .pak is needed when none is written",
+        );
+        t.item(STATIC, 0, 14, 167, 64, 9, NONE, "Mount &point:");
+        t.item(
+            EDIT,
+            ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
+            80,
+            165,
+            226,
+            13,
+            ID_PMOUNT,
+            "",
+        );
+        t.item(STATIC, SS_NOPREFIX, 80, 181, 226, 16, NONE, "Empty: the common folder of the packed files (as UE does).\nExample: ../../../Game/Content/Mods/");
+        // files and errors
+        t.item(STATIC, SS_NOPREFIX, 7, 205, 306, 26, ID_PINFO, "");
+        t.item(STATIC, SS_NOPREFIX, 7, 232, 196, 22, ID_PERROR, "");
+        t.item(
+            BUTTON,
+            BS_DEFPUSHBUTTON | WS_TABSTOP,
+            209,
+            241,
+            50,
+            14,
+            1,
+            "OK",
+        );
+        t.item(BUTTON, WS_TABSTOP, 263, 241, 50, 14, 2, "Cancel");
+        t.into_dwords()
+    }
+
+    unsafe fn fill(hwnd: HWND, id: u16, items: impl Iterator<Item = &'static str>, sel: usize) {
+        for it in items {
+            let w = wide(it);
+            SendDlgItemMessageW(hwnd, id as i32, CB_ADDSTRING, 0, w.as_ptr() as LPARAM);
+        }
+        SendDlgItemMessageW(hwnd, id as i32, CB_SETCURSEL, sel, 0);
+    }
+
+    unsafe fn sel(hwnd: HWND, id: u16) -> usize {
+        let r = SendDlgItemMessageW(hwnd, id as i32, CB_GETCURSEL, 0, 0);
+        if r < 0 {
+            usize::MAX
+        } else {
+            r as usize
+        }
+    }
+
+    unsafe fn checked(hwnd: HWND, id: u16) -> bool {
+        SendDlgItemMessageW(hwnd, id as i32, BM_GETCHECK, 0, 0) == 1
+    }
+
+    unsafe fn text(hwnd: HWND, id: u16) -> String {
+        let mut buf = [0u16; 1024];
+        let n = GetDlgItemTextW(hwnd, id as i32, buf.as_mut_ptr(), buf.len() as i32);
+        String::from_utf16_lossy(&buf[..n.max(0) as usize])
+    }
+
+    unsafe fn read_form(hwnd: HWND) -> PackForm {
+        PackForm {
+            mode: sel(hwnd, ID_PMODE),
+            compression: sel(hwnd, ID_PCOMP),
+            zlib_level: sel(hwnd, ID_PZLIB),
+            oodle_compressor: sel(hwnd, ID_POODLEC),
+            oodle_level: sel(hwnd, ID_POODLEL),
+            compact: checked(hwnd, ID_PCOMPACT),
+            auto_compact_under: text(hwnd, ID_PAUTO),
+            write_empty_pak: checked(hwnd, ID_PWRITEPAK),
+            warn_pak_needed: checked(hwnd, ID_PWARNPAK),
+            new_mount_point: text(hwnd, ID_PMOUNT),
+        }
+    }
+
+    /// Greys out what the current choices make irrelevant.
+    unsafe fn update_enabled(hwnd: HWND) {
+        let f = read_form(hwnd);
+        let en = |id: u16, on: bool| {
+            EnableWindow(GetDlgItem(hwnd, id as i32), on as i32);
+        };
+        en(ID_PZLIB, f.zlib_level_used());
+        en(ID_PZLIBLABEL, f.zlib_level_used());
+        en(ID_POODLEC, f.oodle_used());
+        en(ID_POODLEL, f.oodle_used());
+        en(ID_POODLELABEL, f.oodle_used());
+        en(ID_PWARNPAK, !f.write_empty_pak);
+    }
+
+    unsafe extern "system" fn pproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> isize {
+        match msg {
+            WM_INITDIALOG => {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, lp);
+                let st = &*(lp as *const PState);
+                let f = &st.form;
+                fill(hwnd, ID_PMODE, MODES.iter().map(|m| m.0), f.mode);
+                fill(
+                    hwnd,
+                    ID_PCOMP,
+                    COMPRESSIONS.iter().map(|m| m.0),
+                    f.compression,
+                );
+                fill(hwnd, ID_PZLIB, ZLIB_LEVELS.iter().copied(), f.zlib_level);
+                fill(
+                    hwnd,
+                    ID_POODLEC,
+                    OODLE_COMPRESSORS.iter().map(|m| m.0),
+                    f.oodle_compressor,
+                );
+                fill(
+                    hwnd,
+                    ID_POODLEL,
+                    OODLE_LEVELS.iter().map(|m| m.0),
+                    f.oodle_level,
+                );
+                SendDlgItemMessageW(hwnd, ID_PCOMPACT as i32, BM_SETCHECK, f.compact as usize, 0);
+                SendDlgItemMessageW(
+                    hwnd,
+                    ID_PWRITEPAK as i32,
+                    BM_SETCHECK,
+                    f.write_empty_pak as usize,
+                    0,
+                );
+                SendDlgItemMessageW(
+                    hwnd,
+                    ID_PWARNPAK as i32,
+                    BM_SETCHECK,
+                    f.warn_pak_needed as usize,
+                    0,
+                );
+                SetDlgItemTextW(hwnd, ID_PAUTO as i32, wide(&f.auto_compact_under).as_ptr());
+                SetDlgItemTextW(hwnd, ID_PMOUNT as i32, wide(&f.new_mount_point).as_ptr());
+                SetDlgItemTextW(hwnd, ID_PINFO as i32, st.info.as_ptr());
+                update_enabled(hwnd);
+                1
+            }
+            WM_COMMAND => {
+                let id = (wp & 0xFFFF) as u16;
+                let code = ((wp >> 16) & 0xFFFF) as u32;
+                let st = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PState;
+                if (id == ID_PCOMP && code == CBN_SELCHANGE)
+                    || (id == ID_PWRITEPAK && code == BN_CLICKED)
+                {
+                    update_enabled(hwnd);
+                    return 1;
+                }
+                if id == 1 && !st.is_null() {
+                    let f = read_form(hwnd);
+                    match f.to_options() {
+                        Ok(_) => {
+                            (*st).answer = Some(f);
+                            EndDialog(hwnd, 1);
+                        }
+                        Err(e) => {
+                            SetDlgItemTextW(
+                                hwnd,
+                                ID_PERROR as i32,
+                                wide(&format!("\u{26A0} {e}")).as_ptr(),
+                            );
+                        }
+                    }
+                    return 1;
+                }
+                if id == 2 {
+                    EndDialog(hwnd, 0);
+                    return 1;
+                }
+                0
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn configure_pack(
+        parent: *mut core::ffi::c_void,
+        form: &PackForm,
+        info: &str,
+    ) -> Option<PackForm> {
+        let mut st = PState {
+            form: form.clone(),
+            info: wide(info),
+            answer: None,
+        };
+        let tpl = pack_template();
+        let owner = if parent.is_null() {
+            unsafe { GetActiveWindow() }
+        } else {
+            parent as HWND
+        };
+        let r = unsafe {
+            DialogBoxIndirectParamW(
+                crate::win::module_handle(),
+                tpl.as_ptr() as *const DLGTEMPLATE,
+                owner,
+                Some(pproc),
+                &mut st as *mut PState as LPARAM,
+            )
+        };
+        if r == -1 {
+            let err = unsafe { GetLastError() };
+            crate::dlog!("packing settings dialog could not be created (error {err})");
+            crate::win::error(&format!(
+                "The packing settings dialog could not be shown (Windows error {err})."
+            ));
+        }
+        st.answer
+    }
 }
 
 
@@ -467,6 +824,13 @@ mod imp {
         None
     }
     pub fn prompt_version(_p: &VersionPrompt) -> Option<VersionAnswer> {
+        None
+    }
+    pub fn configure_pack(
+        _parent: *mut core::ffi::c_void,
+        _form: &crate::pack_settings::PackForm,
+        _info: &str,
+    ) -> Option<crate::pack_settings::PackForm> {
         None
     }
 }

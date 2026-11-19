@@ -25,7 +25,7 @@ real Windows is open (§13).
 ### Next goals (candidates, to be ordered with the user)
 | # | Goal | Scope | Size | Notes |
 |---|---|---|---|---|
-| N1 | **Packing, raw** | Raw Zen files into containers: replace/delete in existing containers, new patch containers from game files; writer in `iostore` | large | **Done 2026-11-19 (§6b)**, ini only (Configure dialog open). **N1b (highest backburner): replace with addition** (new packages) |
+| N1 | **Packing, raw** | Raw Zen files into containers: replace/delete in existing containers, new patch containers from game files; writer in `iostore` | large | **Done 2026-11-19 (§6b)**, Configure dialog 2026-11-20. **N1b (highest backburner): replace with addition** (new packages) |
 | N2 | **Packing, legacy input** | Legacy `.uasset/.uexp/.ubulk` converted to Zen on pack (retoc `to-zen`), auto-detected, else asked once per copy session **[decided]** | large | Needs the global's script objects (already mandatory) and an engine version for the target; Zen header-size field per version (§6a.2) |
 | N3 | **Legacy conversion on extract** | Hidden `$legacy` folder: Zen packages as legacy `.uasset/.uexp/.ubulk…`, rebuilt shader libraries, `scriptobjects.bin` (retoc `to-legacy`) | medium | Done, incl. N3b (UE 5.8 shader hashes, §6a.1) |
 | N4 | **Custom game support** | Game profiles ported from CUE4Parse (keys, custom encryption, block layouts, magics); per-folder profile, offered on a read failure **[decided]** | medium per game | Hook in place (§2.2); needs the user's game-specific samples |
@@ -445,7 +445,7 @@ later), blocks with compression + AES-ECB padding as UE, perfect-hash chunk tabl
 algorithm), directory index (encrypted when the container is), partitions, meta flags, TOC
 signature data dropped. Container header (de)serialized with the fork's `retoc::container_header`.
 
-**Configure dialog** (packing part) **[proposed]**: compression (Match game / methods + level),
+**Configure dialog** (packing part) **[done 2026-11-20, see As built]**: compression (Match game / methods + level),
 block size, PackMode (ReplaceOnly / ReplaceWithAddition — "later"), Compact, AutoCompactUnder,
 UndoLimit, WriteEmptyPak, mount point for new containers, WarnPakNeeded.
 
@@ -479,8 +479,17 @@ pieces only; a game load test by the user (patch container + empty `.pak`).
   `BACKGROUND_PACK`; **TC needs the ANSI `PackFiles`/`DeleteFiles` exports** even when the W
   ones exist (without them: "Error packing files!" and no call); stubs added as in uepak.
   Busy guard + `.uetoc-lock` from uepak.
-- Not yet: the Configure dialog (ini only; `ConfigurePacker` names the ini), ReplaceWithAddition
-  (N1b), legacy input (N2).
+- Configure dialog (2026-11-20, `ConfigurePacker`, also the Configure button of TC's Alt+F5
+  dialog): Mode, Compression (Match the game / None / Zlib / Gzip / LZ4 / Oodle), Zlib/Gzip level,
+  Oodle compressor + level (level lists greyed when the method doesn't use them; Match keeps
+  both), Rebuild after every change, Rebuild containers smaller than (size with K/M/G), Write
+  empty `.pak`, Warn that a `.pak` is needed (only when no `.pak` is written), Mount point (empty =
+  Auto; backslashes and a missing trailing `/` are fixed). File locations at the bottom. Bad
+  input shows a line in the dialog, which stays open. OK writes the `[Pack]` lines into the
+  settings ini, keeping every comment in its column. Form logic in `pack_settings.rs` (tested).
+  Block size and UndoLimit from the plan are not offered (block size comes from the game; one
+  undo record).
+- Not yet: ReplaceWithAddition (N1b), legacy input (N2).
 
 ## 7. AES keys **[decided]**: own file
 `uetoc.keys.json` in the settings directory, same format, lookup order (folder/parent folder →
@@ -513,7 +522,7 @@ WarnPakNeeded=1             ; when WriteEmptyPak=0: warn that a .pak is needed
 Compact=0 / AutoCompactUnder=10M / NewMountPoint=Auto
 DebugLog=0
 ```
-No settings dialog yet; `ConfigurePacker` opens a message box naming the ini file.
+`ConfigurePacker` opens the packing settings dialog (§6b); `[Options]` stay ini-only.
 
 ## 10. Diagnostics and robustness
 Taken from uepak: panic guard on every export, `DebugLog=1` → `uetoc.log` or in-memory log +
@@ -634,6 +643,13 @@ crashes on start there):
   `$legacy` and the folder. F8 on `$chunks\…ContainerHeader`: refused with our message, then TC's
   "User abort!" (as uepak, `E_EABORTED`). F8 on `BP_SML.uasset`: "1 removed, rebuilt" (`.ucas`
   64 bytes).
+
+- **Configure dialog (2026-11-20)**: opened from Alt+F5 → Configure with ucas selected. Shows the
+  ini values; LZ4 greys out both level lists; unticking the `.pak` box enables the warning box;
+  "ten" as size shows the error line and keeps the dialog open; OK with `20M` and
+  `..\..\..\Moadra\Content\Mods` wrote `AutoCompactUnder=20M`,
+  `NewMountPoint=../../../Moadra/Content/Mods/`, comments kept; reopening showed the saved values.
+  A label was cut off under Wine's font at first (widened).
 
 ## 13. Open items
 - Short check on real Windows (§12a was done under Wine): dialog layout/fonts, install from

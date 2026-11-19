@@ -19,6 +19,7 @@ pub mod keys;
 pub mod legacy;
 pub mod log;
 pub mod pack;
+pub mod pack_settings;
 pub mod profile;
 mod progress;
 pub mod read;
@@ -340,19 +341,31 @@ pub unsafe extern "system" fn DeleteFilesW(packed_file: *const u16, delete_list:
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn ConfigurePacker(_parent: *mut c_void, _dll_instance: *mut c_void) {
+pub extern "system" fn ConfigurePacker(parent: *mut c_void, _dll_instance: *mut c_void) {
     guard((), "ConfigurePacker", || {
         init();
         let ini = config::ini_path().or_else(|| config::settings_dir().map(|d| d.join(config::INI_NAME)));
         let keys = config::settings_dir().map(|d| d.join(keys::KEYS_NAME));
         let show = |p: Option<PathBuf>| p.map(|p| p.display().to_string()).unwrap_or_else(|| "(plugin folder not found)".into());
-        win::info(&format!(
-            "UE IoStore plugin {}.\n\nOptions (also packing: [Pack] section) are set in:\n{}\n\nRemembered AES keys:\n{}\n\nOodle library folder:\n{}",
+        let info = format!(
+            "Plugin {}. Settings: {}\nAES keys: {}\nOodle library folder: {}",
             env!("CARGO_PKG_VERSION"),
             show(ini),
             show(keys),
             show(config::deps_dir())
-        ));
+        );
+        let opts = reload_options();
+        let form = pack_settings::PackForm::from_options(&opts.pack);
+        let Some(answer) = dialog::configure_pack(parent, &form, &info) else { return };
+        if answer == form {
+            return;
+        }
+        // validated by the dialog
+        let Ok(pack) = answer.to_options() else { return };
+        match config::set_values("Pack", &pack_settings::ini_values(&pack)) {
+            Ok(path) => dlog!("ConfigurePacker: [Pack] saved to {}", path.display()),
+            Err(e) => win::error(&format!("The settings could not be saved: {e}")),
+        }
     })
 }
 

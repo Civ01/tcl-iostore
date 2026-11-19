@@ -31,7 +31,8 @@ decisions: [SPEC.md](SPEC.md).
   cancels the whole copy with one message. A new container takes TOC version, block size and
   compression from the game and gets an empty companion `.pak` (`WriteEmptyPak`). Changes are
   appended with an undo record (restored on the next open after a crash); small containers are
-  rebuilt (`AutoCompactUnder`). Settings: `[Pack]` in `uetoc.ini`.
+  rebuilt (`AutoCompactUnder`). Settings: the plugin's Configure dialog (Alt+F5 → Configure),
+  stored in `[Pack]` of `uetoc.ini`.
 - Encrypted containers: AES key dialog; keys are remembered in `uetoc.keys.json`.
 - Compression: Zlib, Gzip, LZ4, Zstd built in; Oodle with `deps\oo2core_N_win64.dll`
   (copy it from the game).
