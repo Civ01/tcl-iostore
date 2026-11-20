@@ -20,6 +20,7 @@ pub mod legacy;
 pub mod log;
 pub mod pack;
 pub mod pack_settings;
+pub mod validate;
 pub mod profile;
 mod progress;
 pub mod read;

@@ -477,7 +477,7 @@ mod imp {
     // ---- packing settings (ConfigurePacker)
 
     use crate::pack_settings::{
-        PackForm, COMPRESSIONS, MODES, OODLE_COMPRESSORS, OODLE_LEVELS, ZLIB_LEVELS,
+        PackForm, COMPRESSIONS, MODES, OODLE_COMPRESSORS, OODLE_LEVELS, VALIDATIONS, ZLIB_LEVELS,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 
@@ -495,6 +495,7 @@ mod imp {
     const ID_PERROR: u16 = 311;
     const ID_PZLIBLABEL: u16 = 312;
     const ID_POODLELABEL: u16 = 313;
+    const ID_PVALID: u16 = 314;
     const CBN_SELCHANGE: u32 = 1;
     const BN_CLICKED: u32 = 0;
 
@@ -517,9 +518,9 @@ mod imp {
         const BS_GROUPBOX: u32 = 7;
         const NONE: u16 = 0xFFFF;
         let list = CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP;
-        let mut t = Tpl::dialog("UE IoStore plugin: packing settings", 320, 262);
+        let mut t = Tpl::dialog("UE IoStore plugin: packing settings", 320, 279);
         // what and how
-        t.item(BUTTON, BS_GROUPBOX, 7, 4, 306, 66, NONE, "Packing");
+        t.item(BUTTON, BS_GROUPBOX, 7, 4, 306, 83, NONE, "Packing");
         t.item(STATIC, 0, 14, 18, 64, 9, NONE, "&Mode:");
         t.item(COMBOBOX, list, 80, 16, 226, 80, ID_PMODE, "");
         t.item(STATIC, 0, 14, 35, 64, 9, NONE, "&Compression:");
@@ -538,12 +539,14 @@ mod imp {
         t.item(STATIC, 0, 14, 52, 64, 9, ID_POODLELABEL, "&Oodle:");
         t.item(COMBOBOX, list, 80, 50, 90, 120, ID_POODLEC, "");
         t.item(COMBOBOX, list, 178, 50, 128, 160, ID_POODLEL, "");
+        t.item(STATIC, 0, 14, 69, 64, 9, NONE, "&Validation:");
+        t.item(COMBOBOX, list, 80, 67, 226, 80, ID_PVALID, "");
         // existing containers
         t.item(
             BUTTON,
             BS_GROUPBOX,
             7,
-            74,
+            91,
             306,
             46,
             NONE,
@@ -553,7 +556,7 @@ mod imp {
             BUTTON,
             BS_AUTOCHECKBOX | WS_TABSTOP,
             14,
-            87,
+            104,
             290,
             10,
             ID_PCOMPACT,
@@ -563,7 +566,7 @@ mod imp {
             STATIC,
             0,
             14,
-            103,
+            120,
             130,
             9,
             NONE,
@@ -573,19 +576,19 @@ mod imp {
             EDIT,
             ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
             148,
-            101,
+            118,
             44,
             13,
             ID_PAUTO,
             "",
         );
-        t.item(STATIC, 0, 198, 103, 108, 9, NONE, "(e.g. 10M; 0 = never)");
+        t.item(STATIC, 0, 198, 120, 108, 9, NONE, "(e.g. 10M; 0 = never)");
         // new containers
         t.item(
             BUTTON,
             BS_GROUPBOX,
             7,
-            124,
+            141,
             306,
             76,
             NONE,
@@ -595,7 +598,7 @@ mod imp {
             BUTTON,
             BS_AUTOCHECKBOX | WS_TABSTOP,
             14,
-            137,
+            154,
             290,
             10,
             ID_PWRITEPAK,
@@ -605,38 +608,38 @@ mod imp {
             BUTTON,
             BS_AUTOCHECKBOX | WS_TABSTOP,
             26,
-            150,
+            167,
             278,
             10,
             ID_PWARNPAK,
             "&Warn that a .pak is needed when none is written",
         );
-        t.item(STATIC, 0, 14, 167, 64, 9, NONE, "Mount &point:");
+        t.item(STATIC, 0, 14, 184, 64, 9, NONE, "Mount &point:");
         t.item(
             EDIT,
             ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
             80,
-            165,
+            182,
             226,
             13,
             ID_PMOUNT,
             "",
         );
-        t.item(STATIC, SS_NOPREFIX, 80, 181, 226, 16, NONE, "Empty: the common folder of the packed files (as UE does).\nExample: ../../../Game/Content/Mods/");
+        t.item(STATIC, SS_NOPREFIX, 80, 198, 226, 16, NONE, "Empty: the common folder of the packed files (as UE does).\nExample: ../../../Game/Content/Mods/");
         // files and errors
-        t.item(STATIC, SS_NOPREFIX, 7, 205, 306, 26, ID_PINFO, "");
-        t.item(STATIC, SS_NOPREFIX, 7, 232, 196, 22, ID_PERROR, "");
+        t.item(STATIC, SS_NOPREFIX, 7, 222, 306, 26, ID_PINFO, "");
+        t.item(STATIC, SS_NOPREFIX, 7, 249, 196, 22, ID_PERROR, "");
         t.item(
             BUTTON,
             BS_DEFPUSHBUTTON | WS_TABSTOP,
             209,
-            241,
+            258,
             50,
             14,
             1,
             "OK",
         );
-        t.item(BUTTON, WS_TABSTOP, 263, 241, 50, 14, 2, "Cancel");
+        t.item(BUTTON, WS_TABSTOP, 263, 258, 50, 14, 2, "Cancel");
         t.into_dwords()
     }
 
@@ -679,6 +682,7 @@ mod imp {
             write_empty_pak: checked(hwnd, ID_PWRITEPAK),
             warn_pak_needed: checked(hwnd, ID_PWARNPAK),
             new_mount_point: text(hwnd, ID_PMOUNT),
+            validate: sel(hwnd, ID_PVALID),
         }
     }
 
@@ -722,6 +726,7 @@ mod imp {
                     OODLE_LEVELS.iter().map(|m| m.0),
                     f.oodle_level,
                 );
+                fill(hwnd, ID_PVALID, VALIDATIONS.iter().map(|m| m.0), f.validate);
                 SendDlgItemMessageW(hwnd, ID_PCOMPACT as i32, BM_SETCHECK, f.compact as usize, 0);
                 SendDlgItemMessageW(
                     hwnd,

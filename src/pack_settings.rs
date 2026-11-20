@@ -2,7 +2,7 @@
 //! back, with validation, and the ini lines written on OK. The Win32 dialog itself is in
 //! `dialog.rs`; everything here is plain data so it is unit-tested.
 
-use crate::config::{parse_size, PackCompression, PackMode, PackOptions};
+use crate::config::{parse_size, PackCompression, PackMode, PackOptions, ValidateOnReplace};
 use iostore::write::{OodleCompressor, OodleLevel};
 
 pub const MODES: [(&str, PackMode); 2] = [
@@ -44,6 +44,13 @@ pub const OODLE_LEVELS: [(&str, OodleLevel); 9] = [
     ("Optimal5", OodleLevel::Optimal5),
 ];
 
+pub const VALIDATIONS: [(&str, ValidateOnReplace); 4] = [
+    ("Warn: ask before packing", ValidateOnReplace::Warn),
+    ("Fix: correct the imports, then list the fixes", ValidateOnReplace::Fix),
+    ("Error: refuse the copy", ValidateOnReplace::Error),
+    ("Off: no checks", ValidateOnReplace::Off),
+];
+
 pub const ZLIB_LEVELS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
 
 /// What the dialog shows: list indices, check boxes and edit texts.
@@ -60,6 +67,7 @@ pub struct PackForm {
     pub warn_pak_needed: bool,
     /// Empty = Auto.
     pub new_mount_point: String,
+    pub validate: usize,
 }
 
 fn index_of<T: PartialEq + Copy>(list: &[(&str, T)], v: T) -> usize {
@@ -79,6 +87,7 @@ impl PackForm {
             write_empty_pak: p.write_empty_pak,
             warn_pak_needed: p.warn_pak_needed,
             new_mount_point: p.new_mount_point.clone().unwrap_or_default(),
+            validate: index_of(&VALIDATIONS, p.validate_on_replace),
         }
     }
 
@@ -113,6 +122,7 @@ impl PackForm {
             write_empty_pak: self.write_empty_pak,
             warn_pak_needed: self.warn_pak_needed,
             new_mount_point: normalize_mount_point(&self.new_mount_point)?,
+            validate_on_replace: VALIDATIONS[pick(self.validate, VALIDATIONS.len(), "validation")?].1,
         })
     }
 
@@ -200,6 +210,16 @@ pub fn ini_values(p: &PackOptions) -> Vec<(&'static str, String)> {
             "NewMountPoint",
             p.new_mount_point.clone().unwrap_or_else(|| "Auto".into()),
         ),
+        (
+            "ValidateOnReplace",
+            match p.validate_on_replace {
+                ValidateOnReplace::Warn => "Warn",
+                ValidateOnReplace::Fix => "Fix",
+                ValidateOnReplace::Error => "Error",
+                ValidateOnReplace::Off => "Off",
+            }
+            .into(),
+        ),
     ]
 }
 
@@ -241,6 +261,7 @@ mod tests {
                     } else {
                         r"..\..\..\Game\Content".into()
                     },
+                    validate: compression % VALIDATIONS.len(),
                 };
                 let opts = form.to_options().unwrap();
                 let mut text = shipped.to_string();

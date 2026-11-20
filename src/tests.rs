@@ -43,7 +43,7 @@ fn key_in(text: &str) -> Option<keys::AesKey> {
 }
 
 /// Puts the folder's key.txt into the session cache (as if entered with "session only").
-fn register_key(utoc: &Path) {
+pub(crate) fn register_key(utoc: &Path) {
     if let Some(k) = std::fs::read_to_string(utoc.with_file_name("key.txt")).ok().and_then(|t| key_in(&t)) {
         let c = iostore::Container::open(utoc, profile::profile_for(utoc)).unwrap();
         keys::remember(utoc.parent().unwrap(), &c.header().key_guid.to_string(), &k, false).unwrap();

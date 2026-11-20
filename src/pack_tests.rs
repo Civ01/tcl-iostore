@@ -292,3 +292,162 @@ fn empty_pak_is_what_repak_reads() {
     assert_eq!(r.version(), repak::Version::V11);
     assert!(r.files().is_empty());
 }
+
+/// Every package of a whole game compared with itself (`VALIDATE_SELF` = a global.utoc, e.g.
+/// The Isle or ARK server): `ValidateOnReplace` must find nothing in an unmodified game.
+#[test]
+fn validation_finds_nothing_in_an_unmodified_game() {
+    let Some(global) = std::env::var_os("VALIDATE_SELF").map(PathBuf::from) else { return eprintln!("VALIDATE_SELF not set: skipped") };
+    if let Some(o) = std::env::var_os("IOSTORE_OODLE") {
+        iostore::set_oodle_search_paths([PathBuf::from(o)]);
+    }
+    // key.txt next to the containers, for encrypted games
+    for e in std::fs::read_dir(global.parent().unwrap()).unwrap().flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "utoc") && Container::open(&p, Arc::new(Vanilla)).is_ok_and(|c| c.is_encrypted()) {
+            crate::tests::register_key(&p);
+        }
+    }
+    let game = pack::Game::build(&global);
+    let (mut checked, mut skipped) = (0usize, 0usize);
+    let mut problems = Vec::new();
+    for gc in game.containers.iter().filter(|c| !c.is_global) {
+        let Ok(c) = pack::open_quiet(&gc.utoc) else {
+            skipped += 1;
+            continue;
+        };
+        let Some(hi) = c.chunks().find(|i| i.kind == ChunkKind::ContainerHeader) else { continue };
+        let Ok(raw) = c.read_chunk(hi.index) else {
+            skipped += 1;
+            continue;
+        };
+        let header = FIoContainerHeader::deserialize(&mut std::io::Cursor::new(raw), None).unwrap();
+        let toc = retoc::EIoStoreTocVersion::from_repr(gc.version.0).unwrap();
+        for info in c.chunks().filter(|i| i.kind == ChunkKind::ExportBundleData).collect::<Vec<_>>() {
+            let Some(entry) = header.get_store_entry(retoc::FPackageId(info.id.id64())) else { continue };
+            let data = match c.read_chunk(info.index) {
+                Ok(d) => d,
+                Err(e) => {
+                    problems.push(format!("{} {}: read {e}", gc.utoc.display(), info.id.hex()));
+                    continue;
+                }
+            };
+            let hv = header.version;
+            let old = crate::validate::read_header(&mut std::io::Cursor::new(&data), Some(entry.clone()), toc, hv);
+            let new_entry = if crate::validate::names_imports(hv) { None } else { Some(entry.clone()) };
+            let new = crate::validate::read_header(&mut std::io::Cursor::new(&data), new_entry, toc, hv);
+            match (old, new) {
+                (Ok(o), Ok(n)) => {
+                    let ch = crate::validate::compare(&o, &n, &entry, hv);
+                    if !ch.issues.is_empty() {
+                        problems.push(format!("{} {}: {:?}", gc.utoc.display(), info.id.hex(), ch.issues));
+                    }
+                }
+                (o, n) => problems.push(format!("{} {}: unreadable {:?} / {:?}", gc.utoc.display(), info.id.hex(), o.err(), n.err())),
+            }
+            checked += 1;
+        }
+    }
+    eprintln!("validation self-check: {checked} packages, {skipped} containers skipped, {} problems", problems.len());
+    for p in problems.iter().take(20) {
+        eprintln!("  {p}");
+    }
+    assert!(problems.is_empty());
+}
+
+/// `ValidateOnReplace` on a package replaced by a different one (B's path, A's bytes): every
+/// mode does what SPEC §6b.1 says, in every sample game.
+#[test]
+fn validate_on_replace_modes() {
+    use crate::config::ValidateOnReplace as V;
+    let _l = lock();
+    let games = games();
+    if games.is_empty() {
+        return eprintln!("IOSTORE_SAMPLES not set or no game folders: skipped");
+    }
+    let mut fixable_seen = false;
+    for (n, g) in games.iter().enumerate() {
+        let probe = copy_game(g, &format!("validate{n}"));
+        let Some((utoc, a, b)) = targets(&probe).into_iter().find_map(|t| {
+            let s = snapshot(&t);
+            let pk: Vec<&String> = s.files.iter().filter(|(k, id)| k.ends_with(".uasset") && iostore::ChunkId(**id).kind(s.version) == ChunkKind::ExportBundleData).map(|(k, _)| k).collect();
+            (pk.len() >= 2).then(|| (t.clone(), pk[0].clone(), pk[1].clone()))
+        }) else {
+            continue;
+        };
+        let name = utoc.file_name().unwrap().to_owned();
+        let header_version = snapshot(&utoc).header.as_ref().unwrap().version;
+        let fixable = crate::validate::names_imports(header_version);
+        for mode in [V::Error, V::Warn, V::Warn, V::Fix, V::Off] {
+            // fresh copy per mode
+            let copy = copy_game(g, &format!("validate{n}-{mode:?}"));
+            let utoc = copy.join(&name);
+            let src = copy.join("src");
+            let items = extract_named(&utoc, &src);
+            let item_of = |key: &str| items.iter().find(|i| i.to_lowercase().replace('\\', "/").ends_with(key.split_once('/').map_or(key, |x| x.1))).unwrap().clone();
+            let (ia, ib) = (item_of(&a), item_of(&b));
+            std::fs::copy(src.join(ia.replace('\\', "/")), src.join(ib.replace('\\', "/"))).unwrap();
+            let before = snapshot(&utoc);
+            let package_b = retoc::FPackageId(u64::from_le_bytes(before.files[&b][..8].try_into().unwrap()));
+            let package_a = retoc::FPackageId(u64::from_le_bytes(before.files[&a][..8].try_into().unwrap()));
+            let entry_b = before.header.as_ref().unwrap().get_store_entry(package_b).unwrap();
+            let entry_a = before.header.as_ref().unwrap().get_store_entry(package_a).unwrap();
+            let imports_fixable = fixable && entry_a.imported_packages != entry_b.imported_packages;
+            let mut o = options(false);
+            o.pack.validate_on_replace = mode;
+            crate::dialog::TEST_CONFIRM_TEXTS.lock().unwrap().clear();
+            crate::win::TEST_MESSAGES.lock().unwrap().clear();
+            // the second Warn round answers Yes
+            static WARN_ROUND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let warn_yes = mode == V::Warn && WARN_ROUND.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % 2 == 1;
+            if warn_yes {
+                crate::dialog::TEST_CONFIRMS.lock().unwrap().push(true);
+            }
+            let r = pack::pack_files(&utoc.with_extension("ucas"), None, &src, std::slice::from_ref(&ib), pack::PK_PACK_SAVE_PATHS, &o);
+            let after = snapshot(&utoc);
+            let entry_after = after.header.as_ref().unwrap().get_store_entry(package_b).unwrap();
+            let asked = crate::dialog::TEST_CONFIRM_TEXTS.lock().unwrap().clone();
+            let shown = crate::win::TEST_MESSAGES.lock().unwrap().clone();
+            match (mode, warn_yes) {
+                (V::Error, _) => {
+                    let Err(PackError::User(msg)) = r else { panic!("{}: Error mode packed", utoc.display()) };
+                    assert!(msg.contains("Nothing was packed") && msg.contains(&ib), "{msg}");
+                    assert_eq!(before.chunks, after.chunks);
+                }
+                (V::Warn, false) => {
+                    assert!(matches!(r, Err(PackError::Aborted)), "{}", utoc.display());
+                    assert_eq!(asked.len(), 1);
+                    assert!(asked[0].contains("Pack them anyway?") && asked[0].contains(&ib), "{}", asked[0]);
+                    assert_eq!(imports_fixable, asked[0].contains("ValidateOnReplace=Fix would correct"), "{}", asked[0]);
+                    assert_eq!(before.chunks, after.chunks);
+                }
+                (V::Warn, true) => {
+                    r.unwrap();
+                    assert_eq!(entry_after, entry_b, "Warn never changes the entry");
+                }
+                (V::Fix, _) => {
+                    r.unwrap();
+                    assert!(asked.is_empty());
+                    let report = shown.iter().find(|m| m.contains("ValidateOnReplace=Fix")).expect("Fix report");
+                    assert!(report.contains("[not fixable] "), "{report}");
+                    if imports_fixable {
+                        fixable_seen = true;
+                        assert!(report.contains("[fixed] "), "{report}");
+                        assert_eq!(entry_after.imported_packages, entry_a.imported_packages, "imports rebuilt from the new file");
+                        assert_eq!(entry_after.shader_map_hashes, entry_b.shader_map_hashes, "shader maps kept");
+                    } else {
+                        assert_eq!(entry_after, entry_b, "nothing to fix (before 5.3, or the same imports)");
+                    }
+                }
+                (V::Off, _) => {
+                    r.unwrap();
+                    assert!(asked.is_empty() && !shown.iter().any(|m| m.contains("ValidateOnReplace")));
+                    assert_eq!(entry_after, entry_b);
+                }
+            }
+            assert!(!pack::undo_path(&utoc).exists());
+        }
+        eprintln!("validate modes: {} ({b} <- {a}, imports fixable: {fixable})", utoc.display());
+    }
+    assert!(fixable_seen, "no 5.3+ sample game with a fixable case");
+}

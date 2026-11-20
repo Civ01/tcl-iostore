@@ -491,6 +491,41 @@ pieces only; a game load test by the user (patch container + empty `.pak`).
   undo record).
 - Not yet: ReplaceWithAddition (N1b), legacy input (N2).
 
+### 6b.1 ValidateOnReplace **[decided 2026-11-20]**
+
+Packing reuses the game's store entry for every package it replaces or copies from another
+container. The 5.8 loader resolves a package's imports through that entry's imported-package list
+(`AsyncLoading2.cpp`: the import map holds indices into it, copied from the store entry, never
+from the package's own `ImportedPackageNames`), and other packages import this one by public
+export hash. A modded or different package can therefore break loading without any error at pack
+time. Before writing, each such package is compared with the game's version and the entry:
+
+| Check | Versions | Fixable |
+|---|---|---|
+| package name inside the file vs the game's | all | no |
+| imported packages vs the entry (added, removed, order) | 5.3+ (the package names its imports; ids = hashes of the names) | **yes**: the entry gets the new list, shader-map hashes kept |
+| import map points past the entry's list | 5.0–5.2 | no |
+| export count vs the entry | ≤ 5.2 (the entry has export counts) | no |
+| package doesn't parse with the game's entry | ≤ 5.2 (read with the entry) | no |
+| public exports removed, or their class changed; with the game packages importing this one | all (4.27: path hashes) | no |
+
+4.27 import maps hold path hashes, not indices: which package a new import belongs to isn't in the
+file, so added imports can't be detected there. Shader maps and bulk data aren't checked (not in
+the package).
+
+`[Pack] ValidateOnReplace=Warn|Fix|Error|Off` (default **Warn**; Configure dialog: "Validation"):
+- **Warn**: one Yes/No question listing the findings (`[fixable]` marks what Fix would correct);
+  No cancels the whole copy, Yes packs unchanged.
+- **Fix**: fixable issues are corrected in the store entry, everything is packed, then one message
+  lists each issue as `[fixed]` or `[not fixable]` (warning icon when anything couldn't be fixed).
+- **Error**: the whole copy is refused with the list; nothing is written.
+- **Off**: no checks (the user's responsibility).
+
+Tests: every package of an unmodified game compared with itself finds nothing (ARK 168,260 and The
+Isle 36,574 packages, G1R, all samples, `VALIDATE_SELF`); each mode on every sample game with one
+package's bytes under another's name (`validate_on_replace_modes`). TC (2026-11-20): Warn prompt
+(No → nothing written, TC's "User abort!" after it), Fix report, dialog row.
+
 ## 7. AES keys **[decided]**: own file
 `uetoc.keys.json` in the settings directory, same format, lookup order (folder/parent folder →
 same non-zero GUID → dialog), dialog, "session only" checkbox and changed-key wording as uepak
@@ -520,6 +555,7 @@ ZlibLevel=6 / OodleCompressor=Kraken / OodleLevel=Normal
 WriteEmptyPak=1             ; new containers: write an empty companion .pak
 WarnPakNeeded=1             ; when WriteEmptyPak=0: warn that a .pak is needed
 Compact=0 / AutoCompactUnder=10M / NewMountPoint=Auto
+ValidateOnReplace=Warn      ; Warn | Fix | Error | Off (§6b.1)
 DebugLog=0
 ```
 `ConfigurePacker` opens the packing settings dialog (§6b); `[Options]` stay ini-only.

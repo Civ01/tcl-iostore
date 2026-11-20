@@ -8,7 +8,7 @@
 //! [`iostore::edit::ContainerEdit`]: new data is appended, the `.utoc` replaced last, an undo file
 //! kept while writing.
 
-use crate::config::{MountPointMode, Options, PackCompression, PackMode, PackOptions};
+use crate::config::{MountPointMode, Options, PackCompression, PackMode, PackOptions, ValidateOnReplace};
 use crate::dlog;
 use crate::view::Mount;
 use iostore::edit::{ContainerEdit, NewContainer, UndoRecord, partition_path, strip_prefix_ignore_case};
@@ -114,7 +114,7 @@ pub fn game_key(mount: &str, rel: &str) -> String {
     k.to_lowercase()
 }
 
-fn open_quiet(utoc: &Path) -> Result<Container, String> {
+pub(crate) fn open_quiet(utoc: &Path) -> Result<Container, String> {
     let mut c = Container::open(utoc, crate::profile::profile_for(utoc)).map_err(|e| e.to_string())?;
     if c.is_encrypted() {
         let folder = utoc.parent().unwrap_or(Path::new("")).to_path_buf();
@@ -517,6 +517,7 @@ fn apply(
     removals: &[usize],
     compressor: Option<&Compressor>,
     mut header: TargetHeader,
+    fixes: &HashMap<ChunkId, retoc::container_header::StoreEntry>,
 ) -> Result<(usize, usize, usize), PackError> {
     let version = edit.toc().header.version;
     let undo = undo_path(utoc);
@@ -545,6 +546,10 @@ fn apply(
                 Op::Replace { index } => {
                     edit.replace(*index, &mut f, s.input.len, compressor, &mut cancel)?;
                     replaced += 1;
+                    if let (Some(fixed), Some((_, h))) = (fixes.get(&s.id), &mut header) {
+                        h.add_package(retoc::FPackageId(s.id.id64()), fixed.clone());
+                        header_changed = true;
+                    }
                 }
                 Op::Add { from } => {
                     let rel = match (&from.full, &mount) {
@@ -556,7 +561,7 @@ fn apply(
                     if is_package(&s.id, version) {
                         let src = cache.get(&from.utoc).map_err(PackError::Failed)?;
                         let package = retoc::FPackageId(s.id.id64());
-                        let entry = src.and_then(|h| h.get_store_entry(package));
+                        let entry = fixes.get(&s.id).cloned().or_else(|| src.and_then(|h| h.get_store_entry(package)));
                         let refs = src.map(|h| h.soft_references().map(|r| r.get(&package).cloned().unwrap_or_default())).transpose().map_err(|e| PackError::Failed(format!("{e:#}")))?.unwrap_or_default();
                         match (&mut header, entry) {
                             (Some((_, h)), Some(entry)) => {
@@ -610,6 +615,176 @@ fn apply(
     }
 }
 
+// ---------------------------------------------------------------------------
+// ValidateOnReplace (SPEC §6b.1)
+
+/// Result of checking the packages among `steps`.
+#[derive(Default)]
+pub struct Validation {
+    /// Corrected store entries by package chunk (Fix mode only).
+    pub fixes: HashMap<ChunkId, retoc::container_header::StoreEntry>,
+    pub findings: Vec<crate::validate::Finding>,
+}
+
+impl Validation {
+    pub fn any_fixable(&self) -> bool {
+        self.findings.iter().any(|f| f.issues.iter().any(|i| i.fixable()))
+    }
+}
+
+fn toc_enum(v: TocVersion) -> Result<retoc::EIoStoreTocVersion, String> {
+    retoc::EIoStoreTocVersion::from_repr(v.0).ok_or_else(|| format!("TOC version {}", v.0))
+}
+
+/// Game packages whose store entry imports `package` (display paths), across all containers.
+fn importers(game: &Game, package: retoc::FPackageId, cache: &mut HeaderCache) -> Vec<String> {
+    let mut out = Vec::new();
+    for c in game.containers.iter().filter(|c| !c.is_global) {
+        let Ok(Some(h)) = cache.get(&c.utoc) else { continue };
+        for id in h.package_ids() {
+            if h.get_store_entry(id).is_some_and(|e| e.imported_packages.contains(&package)) {
+                let label = ChunkId::create(id.0, 0, ChunkKind::ExportBundleData, c.version)
+                    .and_then(|chunk| game.by_id.get(&chunk))
+                    .and_then(|v| v.iter().find_map(|f| f.full.clone()))
+                    .map(|f| f.trim_start_matches("../").to_string())
+                    .unwrap_or_else(|| format!("{:016x}", id.0));
+                out.push(label);
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Checks every package in `steps` against the game's version and the store entry packing
+/// reuses (the target's for a replace, the source container's for a copy). Fixes are only
+/// collected when `fix`.
+pub fn validate_steps(steps: &[Step], game: &Game, utoc: &Path, target_header: Option<&FIoContainerHeader>, fix: bool) -> Validation {
+    use crate::validate::{self, Finding, Issue};
+    let mut v = Validation::default();
+    let mut cache = HeaderCache::default();
+    let mut opened: HashMap<String, Container> = HashMap::new();
+    for s in steps {
+        let (src_utoc, index) = match &s.op {
+            Op::Replace { index } => (utoc.to_path_buf(), *index as u32),
+            Op::Add { from } => (from.utoc.clone(), from.index),
+        };
+        let Some(gc) = game.containers.iter().find(|c| same_path(&c.utoc, &src_utoc)) else { continue };
+        if !is_package(&s.id, gc.version) {
+            continue;
+        }
+        let package = retoc::FPackageId(s.id.id64());
+        let file = s.input.archive_path.clone();
+        let one = |issue: Issue| Finding { file: file.clone(), issues: vec![issue], importers: vec![], importer_count: 0 };
+        let header = match &s.op {
+            Op::Replace { .. } => target_header,
+            Op::Add { from } => cache.get(&from.utoc).ok().flatten(),
+        };
+        let Some(header) = header else { continue };
+        let (hv, Some(entry)) = (header.version, header.get_store_entry(package)) else { continue };
+        let toc = match toc_enum(gc.version) {
+            Ok(t) => t,
+            Err(e) => {
+                v.findings.push(one(Issue::Unreadable(e)));
+                continue;
+            }
+        };
+        let key = src_utoc.to_string_lossy().to_lowercase();
+        if !opened.contains_key(&key) {
+            match open_quiet(&src_utoc) {
+                Ok(c) => {
+                    opened.insert(key.clone(), c);
+                }
+                Err(e) => {
+                    v.findings.push(one(Issue::Unreadable(format!("the game's version: {e}"))));
+                    continue;
+                }
+            }
+        }
+        let old = opened[&key].read_chunk(index).map_err(|e| e.to_string()).and_then(|d| validate::read_header(&mut Cursor::new(d), Some(entry.clone()), toc, hv));
+        let old = match old {
+            Ok(h) => h,
+            Err(e) => {
+                v.findings.push(one(Issue::Unreadable(format!("the game's version: {e}"))));
+                continue;
+            }
+        };
+        let new_entry = if validate::names_imports(hv) { None } else { Some(entry.clone()) };
+        let new = std::fs::File::open(&s.input.src).map_err(|e| e.to_string()).and_then(|f| validate::read_header(&mut std::io::BufReader::new(f), new_entry, toc, hv));
+        let new = match new {
+            Ok(h) => h,
+            // before 5.3 a package is read with its store entry: a misfit is itself the finding
+            Err(e) if !validate::names_imports(hv) => {
+                v.findings.push(one(Issue::Unreadable(format!("doesn't fit the game's store entry for this package (export bundles or imports differ): {e}"))));
+                continue;
+            }
+            Err(e) => {
+                v.findings.push(one(Issue::Unreadable(e)));
+                continue;
+            }
+        };
+        let check = validate::compare(&old, &new, &entry, hv);
+        if check.issues.is_empty() {
+            continue;
+        }
+        let mut finding = Finding { file, issues: check.issues, importers: vec![], importer_count: 0 };
+        if finding.issues.iter().any(|i| i.affects_importers()) {
+            let all = importers(game, package, &mut cache);
+            finding.importer_count = all.len();
+            finding.importers = all.into_iter().take(10).collect();
+        }
+        for i in &finding.issues {
+            dlog!("  validate {}: {}", finding.file, i.describe());
+        }
+        if fix {
+            if let Some(e) = check.fixed_entry {
+                v.fixes.insert(s.id, e);
+            }
+        }
+        v.findings.push(finding);
+    }
+    v
+}
+
+/// What `ValidateOnReplace` decides before anything is written. `Ok` = go on.
+fn decide_validation(mode: ValidateOnReplace, v: &Validation) -> Result<(), PackError> {
+    use crate::validate::report;
+    if v.findings.is_empty() {
+        return Ok(());
+    }
+    match mode {
+        ValidateOnReplace::Off | ValidateOnReplace::Fix => Ok(()),
+        ValidateOnReplace::Error => Err(PackError::User(format!(
+            "Nothing was packed. These files differ from the game's versions in ways that can break loading:\n{}\n(ValidateOnReplace=Error. Fix corrects the imports where possible; Warn asks; Off packs without checks.)",
+            report(&v.findings, false)
+        ))),
+        ValidateOnReplace::Warn => {
+            let hint = if v.any_fixable() { "\nValidateOnReplace=Fix would correct the issues marked [fixable].\n" } else { "" };
+            let text = format!("These files differ from the game's versions in ways that can break loading:\n{}{hint}\nPack them anyway?", report(&v.findings, false));
+            if crate::dialog::confirm(&text) {
+                Ok(())
+            } else {
+                Err(PackError::Aborted)
+            }
+        }
+    }
+}
+
+/// After a successful Fix-mode pack: what was fixed and what couldn't be.
+fn report_fixes(v: &Validation) {
+    if v.findings.is_empty() {
+        return;
+    }
+    let fixed = v.findings.iter().flat_map(|f| &f.issues).filter(|i| i.fixable()).count();
+    let open = v.findings.iter().flat_map(|f| &f.issues).filter(|i| !i.fixable()).count();
+    let text = format!(
+        "Packed. ValidateOnReplace=Fix: {fixed} fixed, {open} can't be fixed (packed as they are):\n{}",
+        crate::validate::report(&v.findings, true)
+    );
+    if open > 0 { crate::win::warn(&text) } else { crate::win::info(&text) }
+}
+
 /// Total size of the container's files.
 fn container_bytes(utoc: &Path) -> u64 {
     let mut n = std::fs::metadata(utoc).map(|m| m.len()).unwrap_or(0);
@@ -656,11 +831,20 @@ pub fn pack_files(packed: &Path, sub_path: Option<&str>, src_path: &Path, items:
         if edit.is_signed() && !crate::dialog::confirm(&format!("{}\n\nThis container is signed. After the change it is written unsigned; a game that checks signatures may refuse it.\n\nContinue?", utoc.display())) {
             return Err(PackError::Aborted);
         }
+        let validation = if opts.validate_on_replace == ValidateOnReplace::Off {
+            Validation::default()
+        } else {
+            validate_steps(&steps, &game, &utoc, header.as_ref().map(|h| &h.1), opts.validate_on_replace == ValidateOnReplace::Fix)
+        };
+        decide_validation(opts.validate_on_replace, &validation)?;
         let methods = edit.toc().compression_methods.clone();
         let compressor = choose_compressor(opts, Some(&methods), &game)?;
         dlog!("  {} steps ({} replace, {} add), compression {compressor:?}", steps.len(), steps.iter().filter(|s| matches!(s.op, Op::Replace { .. })).count(), steps.iter().filter(|s| matches!(s.op, Op::Add { .. })).count());
         check_space(utoc.parent().unwrap_or(Path::new(".")), input_bytes)?;
-        let (replaced, added, removed) = apply(edit, &utoc, &steps, &[], compressor.as_ref(), header)?;
+        let (replaced, added, removed) = apply(edit, &utoc, &steps, &[], compressor.as_ref(), header, &validation.fixes)?;
+        if opts.validate_on_replace == ValidateOnReplace::Fix {
+            report_fixes(&validation);
+        }
         let compacted = maybe_compact(&utoc, opts)?;
         Ok(Stats { replaced, added, removed, input_bytes, compacted, new_container: false, pak_written: None })
     } else {
@@ -668,6 +852,12 @@ pub fn pack_files(packed: &Path, sub_path: Option<&str>, src_path: &Path, items:
         if !refusals.is_empty() {
             return Err(PackError::User(refusals.message(&game.unreadable)));
         }
+        let validation = if opts.validate_on_replace == ValidateOnReplace::Off {
+            Validation::default()
+        } else {
+            validate_steps(&steps, &game, &utoc, None, opts.validate_on_replace == ValidateOnReplace::Fix)
+        };
+        decide_validation(opts.validate_on_replace, &validation)?;
         let settings = new_container_settings(&utoc, &game, &steps, opts)?;
         let compressor = choose_compressor(opts, None, &game)?;
         let header = new_container_header(&game, &settings)?;
@@ -676,7 +866,7 @@ pub fn pack_files(packed: &Path, sub_path: Option<&str>, src_path: &Path, items:
         let edit = ContainerEdit::create(&utoc, &settings)?;
         // a new container has a header from the start (written on the first package)
         let header = header.map(|h| (None, h));
-        let (_, added, _) = apply(edit, &utoc, &steps, &[], compressor.as_ref(), header).inspect_err(|_| {
+        let (_, added, _) = apply(edit, &utoc, &steps, &[], compressor.as_ref(), header, &validation.fixes).inspect_err(|_| {
             let _ = std::fs::remove_file(&utoc);
             let _ = std::fs::remove_file(partition_path(&utoc, 0));
         })?;
@@ -760,7 +950,7 @@ pub fn delete_files(packed: &Path, items: &[String], options: &Options) -> Resul
     if edit.is_signed() && !crate::dialog::confirm(&format!("{}\n\nThis container is signed. After the change it is written unsigned; a game that checks signatures may refuse it.\n\nContinue?", utoc.display())) {
         return Err(PackError::Aborted);
     }
-    let (_, _, removed) = apply(edit, &utoc, &[], &removals, None, header)?;
+    let (_, _, removed) = apply(edit, &utoc, &[], &removals, None, header, &HashMap::new())?;
     let compacted = maybe_compact(&utoc, &options.pack)?;
     Ok(Stats { replaced: 0, added: 0, removed, input_bytes: 0, compacted, new_container: false, pak_written: None })
 }

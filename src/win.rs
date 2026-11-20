@@ -6,6 +6,10 @@ use std::time::SystemTime;
 
 pub const CAPTION: &str = "UE IoStore plugin";
 
+/// Messages shown during tests (any host), newest last.
+#[cfg(test)]
+pub static TEST_MESSAGES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 /// Shows a modal warning box (Windows) or prints to stderr (other hosts).
 pub fn warn(text: &str) {
     message(text, Icon::Warning)
@@ -17,6 +21,12 @@ pub fn error(text: &str) {
 
 pub fn info(text: &str) {
     message(text, Icon::Info)
+}
+
+pub fn message(text: &str, icon: Icon) {
+    #[cfg(test)]
+    TEST_MESSAGES.lock().unwrap_or_else(|e| e.into_inner()).push(text.to_string());
+    imp::message(text, icon)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

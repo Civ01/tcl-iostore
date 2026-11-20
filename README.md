@@ -33,6 +33,10 @@ decisions: [SPEC.md](SPEC.md).
   appended with an undo record (restored on the next open after a crash); small containers are
   rebuilt (`AutoCompactUnder`). Settings: the plugin's Configure dialog (Alt+F5 → Configure),
   stored in `[Pack]` of `uetoc.ini`.
+- **Checks on replace** (`ValidateOnReplace`, default Warn): a packed package that differs from
+  the game's in ways that can break loading (package name, imports vs the container header,
+  removed or retyped exports other packages use) is reported before anything is written. Fix
+  corrects the import list (UE 5.3+) and reports; Error refuses; Off skips the checks.
 - Encrypted containers: AES key dialog; keys are remembered in `uetoc.keys.json`.
 - Compression: Zlib, Gzip, LZ4, Zstd built in; Oodle with `deps\oo2core_N_win64.dll`
   (copy it from the game).

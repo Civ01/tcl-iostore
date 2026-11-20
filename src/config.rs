@@ -49,6 +49,20 @@ pub enum PackCompression {
     Oodle,
 }
 
+/// `[Pack] ValidateOnReplace`: what to do when a packed file takes the place of a game package
+/// and differs from it in ways that can break loading (SPEC §6b.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidateOnReplace {
+    /// Ask before packing (list of findings, Yes/No).
+    Warn,
+    /// Correct what can be corrected (store entry imports, 5.3+), pack, then list what was done.
+    Fix,
+    /// Refuse the whole copy.
+    Error,
+    /// No checks.
+    Off,
+}
+
 /// `[Pack]` options.
 #[derive(Debug, Clone)]
 pub struct PackOptions {
@@ -68,6 +82,7 @@ pub struct PackOptions {
     pub auto_compact_under: u64,
     /// New containers: `Auto` (UE: common root of the files) or a mount point.
     pub new_mount_point: Option<String>,
+    pub validate_on_replace: ValidateOnReplace,
 }
 
 impl Default for PackOptions {
@@ -83,6 +98,7 @@ impl Default for PackOptions {
             compact: false,
             auto_compact_under: 10 << 20,
             new_mount_point: None,
+            validate_on_replace: ValidateOnReplace::Warn,
         }
     }
 }
@@ -409,6 +425,16 @@ fn parse_pack_option(opts: &mut Options, key: &str, raw: &str) {
                 _ => None,
             };
             c.map(|c| p.compression = c).is_some()
+        }
+        "validateonreplace" => {
+            let v = match lower.as_str() {
+                "warn" => Some(ValidateOnReplace::Warn),
+                "fix" => Some(ValidateOnReplace::Fix),
+                "error" => Some(ValidateOnReplace::Error),
+                "off" => Some(ValidateOnReplace::Off),
+                _ => None,
+            };
+            v.map(|v| p.validate_on_replace = v).is_some()
         }
         "zliblevel" => lower.parse::<u32>().ok().filter(|l| *l <= 9).map(|l| p.zlib_level = l).is_some(),
         "oodlecompressor" => {
