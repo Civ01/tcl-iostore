@@ -4,7 +4,7 @@
 //!
 //! No side effects on what the plugin produces: written after the file is complete, only on
 //! volumes that report named streams (Wine says no but would create a stray `a:uetoc.source`
-//! file), only for `.uasset`/`.umap` destination names, with the main file's times put back.
+//! file), with the main file's times put back.
 //! Every failure is logged and ignored.
 
 use crate::config::SourceStream;
@@ -26,8 +26,9 @@ pub struct SourceInfo {
     pub paks: PathBuf,
     /// The entry's path in the listing (`$legacy\…` for legacy).
     pub entry: String,
-    /// The package's `ExportBundleData` chunk id, 24 hex digits.
-    pub chunk: String,
+    /// The file's chunk id, 24 hex digits (for `$legacy` files the source package's or shader
+    /// library's chunk; `None` for files without one, e.g. `scriptobjects.bin`).
+    pub chunk: Option<String>,
     /// The chunk hash from the TOC (hex).
     pub toc_hash: Option<String>,
     /// `$legacy`: engine version the conversion used (ini spelling).
@@ -49,7 +50,9 @@ impl SourceInfo {
         kv("container", &self.container.to_string_lossy());
         kv("paks", &self.paks.to_string_lossy());
         kv("entry", &self.entry);
-        kv("chunk", &self.chunk);
+        if let Some(c) = &self.chunk {
+            kv("chunk", c);
+        }
         if let Some(h) = &self.toc_hash {
             kv("toc_hash", h);
         }
@@ -87,16 +90,24 @@ pub fn is_view_extraction(dest: &Path, temp: &Path) -> bool {
     first.starts_with("_tc") && parts.next().is_some()
 }
 
-/// Whether a stream may be written for `dest` (scope and file name; not the volume).
-pub fn wanted(mode: SourceStream, dest: &Path, temp: &Path) -> bool {
-    let name = dest.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
-    if !(name.ends_with(".uasset") || name.ends_with(".umap")) {
-        return false;
-    }
+/// Whether `dest` is TC's drag-out temp file: `<temp>\CMD*.tmp` directly in the temp folder
+/// (seen on Windows: `e:\Temp\CMD72B.tmp`; TC then moves it to the drop target).
+pub fn is_drag_extraction(dest: &Path, temp: &Path) -> bool {
+    let (d, t) = (normalized(dest), normalized(temp));
+    let Some(name) = d.strip_prefix(&t).and_then(|r| r.strip_prefix('\\')) else { return false };
+    !name.contains('\\') && name.starts_with("cmd") && name.ends_with(".tmp")
+}
+
+/// Whether a stream may be written for `dest` (not the volume). `is_package`: the archive entry
+/// is a `.uasset`/`.umap` package (raw or `$legacy`); decided by the entry, since TC's temp
+/// files (`CMD*.tmp`) don't keep the name.
+/// - `View`: packages TC extracts to view them (`_tc*`) or to drag them out (`CMD*.tmp`).
+/// - `All`: every extracted file, any operation.
+pub fn wanted(mode: SourceStream, dest: &Path, temp: &Path, is_package: bool) -> bool {
     match mode {
         SourceStream::Off => false,
         SourceStream::All => true,
-        SourceStream::View => is_view_extraction(dest, temp),
+        SourceStream::View => is_package && (is_view_extraction(dest, temp) || is_drag_extraction(dest, temp)),
     }
 }
 
@@ -105,8 +116,8 @@ pub fn wanted(mode: SourceStream, dest: &Path, temp: &Path) -> bool {
 pub static TEST_WRITES: std::sync::Mutex<Vec<(PathBuf, SourceInfo)>> = std::sync::Mutex::new(Vec::new());
 
 /// Writes the stream for `dest` when `mode` and the volume allow it. Never fails.
-pub fn write(mode: SourceStream, dest: &Path, info: &SourceInfo) {
-    if !wanted(mode, dest, &std::env::temp_dir()) {
+pub fn write(mode: SourceStream, dest: &Path, info: &SourceInfo, is_package: bool) {
+    if !wanted(mode, dest, &std::env::temp_dir(), is_package) {
         return;
     }
     #[cfg(test)]
@@ -218,16 +229,32 @@ mod tests {
     }
 
     #[test]
-    fn only_package_names_and_the_mode() {
+    fn drag_out_temp_files() {
+        let t = Path::new(r"e:\Temp");
+        assert!(is_drag_extraction(Path::new(r"e:\Temp\CMD72B.tmp"), t));
+        assert!(is_drag_extraction(Path::new(r"E:\TEMP\cmd210e.TMP"), Path::new(r"e:\Temp\")));
+        assert!(!is_drag_extraction(Path::new(r"e:\Temp\WCSdc76.tmp"), t), "text search");
+        assert!(!is_drag_extraction(Path::new(r"e:\Temp\sub\CMD1.tmp"), t));
+        assert!(!is_drag_extraction(Path::new(r"d:\out\CMD1.tmp"), t));
+        assert!(!is_drag_extraction(Path::new(r"e:\Temp\CMD1.uasset"), t));
+    }
+
+    #[test]
+    fn modes_decide_by_the_entry() {
         let t = Path::new(r"C:\T");
         let view = Path::new(r"C:\T\_tc\a.uasset");
-        let f5 = Path::new(r"D:\out\Game\a.UMAP");
-        assert!(wanted(SourceStream::View, view, t));
-        assert!(!wanted(SourceStream::View, f5, t));
-        assert!(wanted(SourceStream::All, f5, t));
-        assert!(!wanted(SourceStream::Off, view, t));
-        for name in [r"C:\T\_tc\a.uexp", r"C:\T\_tc\a.ubulk", r"C:\T\WCSdc76.tmp", r"C:\T\_tc\x.txt"] {
-            assert!(!wanted(SourceStream::All, Path::new(name), t), "{name}");
+        let drag = Path::new(r"C:\T\CMD72B.tmp");
+        let f5 = Path::new(r"D:\out\Game\a.uasset");
+        let search = Path::new(r"C:\T\WCSdc76.tmp");
+        assert!(wanted(SourceStream::View, view, t, true));
+        assert!(wanted(SourceStream::View, drag, t, true));
+        assert!(!wanted(SourceStream::View, f5, t, true));
+        assert!(!wanted(SourceStream::View, search, t, true));
+        assert!(!wanted(SourceStream::View, view, t, false), "View: packages only");
+        assert!(!wanted(SourceStream::View, drag, t, false));
+        for d in [view, drag, f5, search, Path::new(r"D:\out\a.ubulk")] {
+            assert!(wanted(SourceStream::All, d, t, false), "All: every file {}", d.display());
+            assert!(!wanted(SourceStream::Off, d, t, true));
         }
     }
 
@@ -238,7 +265,7 @@ mod tests {
             container: r"C:\Games\Moadra\Content\Paks\SML.utoc".into(),
             paks: r"C:\Games\Moadra\Content\Paks".into(),
             entry: "$legacy\\Moadra\\Content\\Mods\\SML\\BP_SML.uasset".into(),
-            chunk: "5987b788f2a920550000000001".into(),
+            chunk: Some("5987b788f2a920550000000001".into()),
             toc_hash: Some("ab12".into()),
             engine: Some("UE5_8".into()),
             engine_range: Some("UE5_6-UE5_8".into()),
@@ -247,7 +274,8 @@ mod tests {
         assert!(s.starts_with("uetoc-source 1\nform=legacy\ncontainer=C:\\Games"), "{s}");
         assert!(s.ends_with("engine=UE5_8\nengine_range=UE5_6-UE5_8\n"), "{s}");
         assert!(!s.contains('\r'));
-        let raw = SourceInfo { legacy: false, toc_hash: None, engine: None, engine_range: None, ..i };
+        let raw = SourceInfo { legacy: false, toc_hash: None, engine: None, engine_range: None, ..i.clone() };
+        assert!(!SourceInfo { chunk: None, ..i }.render().contains("chunk="));
         let r = raw.render();
         assert!(r.contains("form=raw\n") && !r.contains("engine") && !r.contains("toc_hash"), "{r}");
         let odd = SourceInfo { entry: "a\nform=x".into(), ..Default::default() };
@@ -267,7 +295,7 @@ mod tests {
         std::fs::write(&f, b"main").unwrap();
         let before = std::fs::metadata(&f).unwrap().modified().unwrap();
         if !imp::supports_streams(&f) {
-            write(SourceStream::All, &f, &SourceInfo::default());
+            write(SourceStream::All, &f, &SourceInfo::default(), true);
             let names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
             assert_eq!(names.len(), 1, "no stray file: {names:?}");
         }
@@ -289,8 +317,8 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         // NTFS temp folder expected (GitHub's Windows runners): fail instead of skipping silently
         assert!(imp::supports_streams(&f), "the temp volume reports no named streams: {}", f.display());
-        let info = SourceInfo { chunk: "00".repeat(12), entry: "Game\\a.uasset".into(), ..Default::default() };
-        write(SourceStream::All, &f, &info);
+        let info = SourceInfo { chunk: Some("00".repeat(12)), entry: "Game\\a.uasset".into(), ..Default::default() };
+        write(SourceStream::All, &f, &info, true);
         assert_eq!(std::fs::read_to_string(stream_path(&f)).unwrap(), info.render());
         assert_eq!(std::fs::read(&f).unwrap(), b"main content");
         let n = std::fs::metadata(&f).unwrap();
@@ -300,7 +328,7 @@ mod tests {
         // View: not under _tc → nothing
         let g = dir.join("b.uasset");
         std::fs::write(&g, b"x").unwrap();
-        write(SourceStream::View, &g, &info);
+        write(SourceStream::View, &g, &info, true);
         assert!(std::fs::metadata(stream_path(&g)).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -560,14 +560,18 @@ pub fn process(arc: &mut Archive, op: c_int, dest: Option<PathBuf>) -> c_int {
     }
 }
 
-/// N7: `:uetoc.source` on an extracted raw package (when the scope and volume allow).
+/// Whether a listing entry is a `.uasset`/`.umap` package.
+fn is_package_name(display: &str) -> bool {
+    let d = display.to_ascii_lowercase();
+    d.ends_with(".uasset") || d.ends_with(".umap")
+}
+
+/// N7: `:uetoc.source` on an extracted raw file (when the scope and volume allow).
 fn source_stream_raw(arc: &mut Archive, index: u32, display: &str, dest: &Path) {
     use crate::source_stream as ss;
-    if !ss::wanted(arc.source_stream, dest, &std::env::temp_dir()) {
-        return;
-    }
     let Ok(info) = arc.container.chunk(index) else { return };
-    if info.kind != iostore::ChunkKind::ExportBundleData {
+    let is_package = info.kind == iostore::ChunkKind::ExportBundleData && is_package_name(display);
+    if !ss::wanted(arc.source_stream, dest, &std::env::temp_dir(), is_package) {
         return;
     }
     if arc.source_engine_range.is_none() {
@@ -587,12 +591,12 @@ fn source_stream_raw(arc: &mut Archive, index: u32, display: &str, dest: &Path) 
         container: arc.container.utoc_path().to_path_buf(),
         paks: arc.global.as_deref().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default(),
         entry: display.to_string(),
-        chunk: info.id.hex(),
+        chunk: Some(info.id.hex()),
         toc_hash: Some(hex(&info.meta.hash)),
         engine: None,
         engine_range: arc.source_engine_range.clone().flatten(),
     };
-    ss::write(arc.source_stream, dest, &src);
+    ss::write(arc.source_stream, dest, &src, is_package);
 }
 
 /// Writes a file produced in memory (`dest` None = test).
@@ -674,22 +678,31 @@ fn process_legacy(arc: &mut Archive, op: c_int, dest: Option<PathBuf>, display: 
     let code = match bytes {
         Ok(b) => {
             let code = write_bytes(if op == PK_TEST { None } else { dest.as_deref() }, display, b);
-            if let (0, PK_EXTRACT, Some(d), LegacyKind::Package { chunk, part: crate::legacy::Part::Asset, .. }) = (code, op, dest.as_deref(), &kind) {
-                if crate::source_stream::wanted(arc.source_stream, d, &std::env::temp_dir()) {
-                    if let Ok(info) = container.chunk(*chunk) {
-                        let names: Vec<&str> = session.engine_candidates().into_iter().map(crate::legacy::version_ini_name).collect();
-                        let src = crate::source_stream::SourceInfo {
-                            legacy: true,
-                            container: container.utoc_path().to_path_buf(),
-                            paks: arc.global.as_deref().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default(),
-                            entry: display.to_string(),
-                            chunk: info.id.hex(),
-                            toc_hash: Some(hex(&info.meta.hash)),
-                            engine: session.version_used(*chunk).map(|v| crate::legacy::version_ini_name(v).to_string()),
-                            engine_range: crate::source_stream::range_text(&names),
-                        };
-                        crate::source_stream::write(arc.source_stream, d, &src);
-                    }
+            if let (0, PK_EXTRACT, Some(d)) = (code, op, dest.as_deref()) {
+                // N7: every $legacy file under All; packages (.uasset/.umap) under View
+                let (chunk, is_package) = match &kind {
+                    LegacyKind::Package { chunk, part, .. } => (Some(*chunk), *part == crate::legacy::Part::Asset),
+                    LegacyKind::ShaderLibrary { chunk, .. } => (Some(*chunk), false),
+                    LegacyKind::ScriptObjects => (None, false),
+                };
+                if crate::source_stream::wanted(arc.source_stream, d, &std::env::temp_dir(), is_package) {
+                    let info = chunk.and_then(|c| container.chunk(c).ok());
+                    let names: Vec<&str> = session.engine_candidates().into_iter().map(crate::legacy::version_ini_name).collect();
+                    let engine = match &kind {
+                        LegacyKind::Package { chunk, .. } => session.version_used(*chunk).map(|v| crate::legacy::version_ini_name(v).to_string()),
+                        _ => None,
+                    };
+                    let src = crate::source_stream::SourceInfo {
+                        legacy: true,
+                        container: container.utoc_path().to_path_buf(),
+                        paks: arc.global.as_deref().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default(),
+                        entry: display.to_string(),
+                        chunk: info.as_ref().map(|i| i.id.hex()),
+                        toc_hash: info.as_ref().map(|i| hex(&i.meta.hash)),
+                        engine,
+                        engine_range: crate::source_stream::range_text(&names),
+                    };
+                    crate::source_stream::write(arc.source_stream, d, &src, is_package);
                 }
             }
             code

@@ -458,8 +458,9 @@ fn legacy_version_prompt() {
     assert_eq!(prompts().len(), 5, "a fitting ini value never asks");
 }
 
-/// N7: extraction fills the source stream's fields (raw and `$legacy`), View writes only under
-/// TC's `%TEMP%\_tc*`, Off never; the extracted bytes are the same with and without it.
+/// N7: extraction fills the source stream's fields (raw and `$legacy`); View writes only for
+/// packages TC extracts to view (`%TEMP%\_tc*`) or drag out (`%TEMP%\CMD*.tmp`); All writes
+/// for every file; Off never; the extracted bytes are the same with and without it.
 #[test]
 fn source_stream_fields_and_scope() {
     use crate::config::SourceStream;
@@ -475,6 +476,7 @@ fn source_stream_fields_and_scope() {
     let global = crate::global::find_global(&utoc, 5).unwrap().utoc;
     let out = tmp("n7");
     let view_dir = std::env::temp_dir().join(format!("_tc_uetoc_test_{}", std::process::id()));
+    let drag_file = std::env::temp_dir().join(format!("CMDuetoc{}.tmp", std::process::id()));
     let _ = std::fs::create_dir_all(&view_dir);
     let mut checked_raw = false;
     let mut checked_legacy = false;
@@ -486,18 +488,28 @@ fn source_stream_fields_and_scope() {
         let mut arc = read::open_archive(&utoc.with_extension("ucas"), &opts, false).unwrap();
         let mut wanted_raw = None;
         let mut wanted_legacy = None;
+        let mut uexp_dest = None;
         while let Some(h) = read::next_header(&mut arc) {
-            let is_pkg = h.name.to_lowercase().ends_with("bp_sml.uasset");
-            if !is_pkg || h.attr & FILE_ATTR_DIRECTORY != 0 {
+            let lower = h.name.to_lowercase();
+            let is_pkg = lower.ends_with("bp_sml.uasset");
+            let is_uexp = lower.ends_with("bp_sml.uexp");
+            if !(is_pkg || is_uexp) || h.attr & FILE_ATTR_DIRECTORY != 0 {
                 assert_eq!(read::process(&mut arc, PK_SKIP, None), 0);
                 continue;
             }
             let legacy_entry = h.name.starts_with("$legacy\\");
-            // View: one copy under the fake TC folder, one outside
-            let dest = if mode == SourceStream::View && legacy_entry { view_dir.join("BP_SML.uasset") } else { out.join(format!("{mode:?}")).join(h.name.replace('\\', "/")) };
+            // View: the legacy package as an F3 view (fake TC folder), the raw one as a drag-out
+            // temp file, the .uexp as a plain extraction
+            let dest = match (mode, legacy_entry, is_pkg) {
+                (SourceStream::View, true, true) => view_dir.join("BP_SML.uasset"),
+                (SourceStream::View, false, true) => drag_file.clone(),
+                _ => out.join(format!("{mode:?}")).join(h.name.replace('\\', "/")),
+            };
             dialog::TEST_VERSION_ANSWERS.lock().unwrap().push((99, false, true));
             assert_eq!(read::process(&mut arc, PK_EXTRACT, Some(dest.clone())), 0, "{}", h.name);
-            if legacy_entry {
+            if is_uexp {
+                uexp_dest = Some(dest);
+            } else if legacy_entry {
                 wanted_legacy = Some((h.name.clone(), dest));
             } else {
                 wanted_raw = Some((h.name.clone(), dest));
@@ -507,9 +519,11 @@ fn source_stream_fields_and_scope() {
         match mode {
             SourceStream::Off => assert!(writes.is_empty(), "{writes:?}"),
             SourceStream::View => {
-                // only the copy under %TEMP%\_tc*\
-                assert_eq!(writes.len(), 1, "{writes:?}");
-                assert_eq!(writes[0].0, wanted_legacy.as_ref().unwrap().1);
+                // the view and the drag-out copy, not the .uexp
+                let dests: Vec<&PathBuf> = writes.iter().map(|w| &w.0).collect();
+                assert_eq!(dests.len(), 2, "{writes:?}");
+                assert!(dests.contains(&&wanted_legacy.as_ref().unwrap().1) && dests.contains(&&drag_file), "{dests:?}");
+                assert!(writes.iter().any(|w| w.0 == drag_file && !w.1.legacy && w.1.chunk.is_some()));
             }
             SourceStream::All => {
                 let (raw_name, raw_dest) = wanted_raw.unwrap();
@@ -522,7 +536,10 @@ fn source_stream_fields_and_scope() {
                 assert_eq!(raw.container, utoc);
                 assert_eq!(raw.paks, global.parent().unwrap());
                 assert_eq!(raw.chunk, leg.chunk, "legacy names its source package's chunk");
-                assert_eq!(raw.chunk.len(), 24);
+                assert_eq!(raw.chunk.as_ref().map(String::len), Some(24));
+                // every file under All, the .uexp too (same source chunk)
+                let uexp = &writes.iter().find(|w| Some(&w.0) == uexp_dest.as_ref()).expect("uexp stream").1;
+                assert!(uexp.legacy && uexp.chunk == leg.chunk);
                 assert_eq!(raw.toc_hash.as_ref().map(String::len), Some(40));
                 assert_eq!(raw.engine, None);
                 assert!(raw.engine_range.as_deref().is_some_and(|r| r.ends_with("UE5_8")), "{:?}", raw.engine_range);
@@ -542,9 +559,10 @@ fn source_stream_fields_and_scope() {
         assert_eq!(std::fs::read(&f).unwrap(), std::fs::read(out.join("Off").join(rel)).unwrap(), "{}", rel.display());
         compared += 1;
     }
-    assert_eq!(compared, 2);
+    assert_eq!(compared, 3);
     assert!(checked_raw && checked_legacy);
     let _ = std::fs::remove_dir_all(&view_dir);
+    let _ = std::fs::remove_file(&drag_file);
 }
 
 fn walk_files(dir: &Path) -> Vec<PathBuf> {

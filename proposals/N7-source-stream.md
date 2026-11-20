@@ -64,9 +64,8 @@ An NTFS *alternate data stream*: extra named data attached to a file, next to it
   **Required, not optional** *(rev)*: verified under Wine 11 (§8.1), which reports no named
   streams for `C:` yet lets `CreateFileW("a.uasset:uetoc.source")` succeed and creates a stray,
   visible file of that name next to the package. On FAT/exFAT the same call fails cleanly.
-- Only when the destination **file name** ends in `.uasset` / `.umap` *(rev)*: TC's text search
-  in archives extracts entries to `%TEMP%\WCSxxxx.tmp` (observed, §8.1); with `All` those temp files
-  would otherwise get a stream each.
+- ~~Only when the destination file name ends in `.uasset` / `.umap`~~ *(superseded, §9: decided
+  by the archive entry; TC's drag-out temp files are named `CMD*.tmp`)*.
 - The main file's times are kept *(rev)*: read its creation/last-write times after closing it,
   write the stream, and set the same times back (`SetFileTime`), so the stream can't change the
   file's date on any file system or Windows version (neither the plugin nor TC set times on
@@ -227,20 +226,34 @@ stays the proposed default.
 
 ## 9. As built (tcl-iostore, 2026-11-20)
 - `src/source_stream.rs` (scope, volume check cached per volume, write + time restore, content),
-  called from `read.rs` after a successful raw package extraction (`ExportBundleData` chunk)
-  and after a `$legacy` `.uasset`/`.umap`. `[Options] SourceStream=View|All|Off`, default `View`.
-- `View` = the destination is anywhere under `<temp>\_tc*\` (`std::env::temp_dir()`, i.e.
-  `GetTempPath2W`/`GetTempPathW`; `\\?\` prefix and case ignored).
-- `engine` (legacy) is written when the conversion used a fixed engine version (ini, prompt or
-  the container's versions); a versioned package converted with its own versions has none —
-  its header carries the versions itself. `engine_range`: legacy = the `$legacy` prompt's list
-  (`Session::engine_candidates`); raw = `legacy::candidates` for the container's TOC and
-  container-header versions (computed once per opened container, only when a stream is wanted).
-- Main file times: read before the stream is written, set back after (`File::set_times` with
-  created/modified/accessed).
-- Tests: scope and content unit tests; `source_stream_fields_and_scope` (samples: raw + legacy
-  fields, View only under `_tc*`, Off never, extracted bytes identical with and without);
-  Windows CI: real stream round trip with unchanged bytes and times. TC under Wine: F3 → scope
-  matched, no stream, no stray file.
-- Still open: §8.2 (drag & drop / paste out of an archive on real Windows).
-
+  called from `read.rs` after every successful extraction of a chunk file and of a `$legacy` file.
+- **Scope, decided by the archive entry** (TC's temp files don't keep the name):
+  - `View` (default): `.uasset`/`.umap` packages (raw or `$legacy`) that TC extracts
+    - to view them: anywhere under `<temp>\_tc*\` (F3, Quick View, Enter), or
+    - to drag them out: `<temp>\CMD*.tmp` directly in the temp folder (user's Windows check:
+      `e:\Temp\CMD72B.tmp`; TC then moves the file to the drop target, keeping the stream on
+      NTFS).
+  - `All`: **every** extracted file (packages, `.uexp`, `.ubulk`, `$chunks` entries, all
+    `$legacy` files incl. shader libraries and `scriptobjects.bin`), on every operation (F5, view,
+    drag, text search). User decision 2026-11-20; text search (`WCS*.tmp`) is not treated
+    specially for now.
+  - `Off`: never.
+  - `<temp>` = `std::env::temp_dir()` (`GetTempPath2W`/`GetTempPathW`; `\\?\` prefix and case
+    ignored).
+- §8.2 resolved by the user's Windows check: Ctrl+C in a container does nothing, right-click →
+  Copy opens TC's copy dialog (= F5); drag-out goes through `CMD*.tmp`, not `_tc`, which is why
+  the first version wrote no stream for drags. It does now under `View`, so a dragged package
+  keeps the stream (with local paths) — accepted with the drag-out request.
+- Content: `chunk` = the file's own chunk; for `$legacy` the source package's (all its parts) or
+  the shader library's; omitted for `scriptobjects.bin`. `engine` (legacy packages) when the
+  conversion used a fixed engine version (ini, prompt or the container's versions); a versioned
+  package converted with its own versions has none. `engine_range`: legacy = the `$legacy`
+  prompt's list (`Session::engine_candidates`); raw = `legacy::candidates` for the container's
+  TOC and container-header versions (once per opened container, only when a stream is wanted).
+- Main file times: read before the stream is written, set back after (`File::set_times`).
+- Tests: scope (`_tc*`, `CMD*.tmp`, `WCS*.tmp` excluded from View), entry-based modes, content;
+  `source_stream_fields_and_scope` (samples: raw/legacy fields, View = F3 + drag copies only, All =
+  every file incl. `.uexp`, Off never, extracted bytes identical with and without); Windows CI:
+  real stream round trip with unchanged bytes and times (fails if the temp volume has no
+  streams). TC under Wine: F3 → scope matched, no stream (no named streams), no stray file.
+- To confirm on Windows: `dir /r` on a dragged package shows `:uetoc.source`.
