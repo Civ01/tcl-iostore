@@ -1,8 +1,10 @@
-# N7: source stream on extracted packages (for tcl-uassetvw) **[proposed 2026-11-20]**
+# N7: source stream on extracted packages (for tcl-uassetvw) **[proposed 2026-11-20, revised by tcl-iostore 2026-11-20]**
 
 Proposal from the tcl-uassetvw project (Lister plugin for `.uasset/.umap` metadata,
 <https://github.com/Civ01/tcl-uassetvw>), to be revised here before anything is implemented.
 Marks as in `SPEC.md`: **[decided]** = user decision, **[proposed]** = open for revision.
+The tcl-iostore review (findings checked under Wine, open questions answered, changes) is §8;
+edits it caused in §2–§6 are marked *(rev)*.
 
 ## 1. Problem
 
@@ -57,14 +59,24 @@ An NTFS *alternate data stream*: extra named data attached to a file, next to it
   - `All`: every package extraction (files extracted earlier still open with names; note that the
     stream holds local absolute paths).
   - `Off`: never.
-- Only when the destination volume reports named streams (`GetVolumeInformationW` →
-  `FILE_NAMED_STREAMS`). This also keeps Wine from creating a stray `BP_SML.uasset:uetoc.source`
-  file in the temp folder (Wine has no streams; verify).
+- Only when the destination volume reports named streams (`GetVolumeInformationW` on the
+  destination's volume root → `FILE_NAMED_STREAMS`), cached per volume for the session.
+  **Required, not optional** *(rev)*: verified under Wine 11 (§8.1), which reports no named
+  streams for `C:` yet lets `CreateFileW("a.uasset:uetoc.source")` succeed and creates a stray,
+  visible file of that name next to the package. On FAT/exFAT the same call fails cleanly.
+- Only when the destination **file name** ends in `.uasset` / `.umap` *(rev)*: TC's text search
+  in archives extracts entries to `%TEMP%\WCSxxxx.tmp` (observed, §8.1); with `All` those temp files
+  would otherwise get a stream each.
+- The main file's times are kept *(rev)*: read its creation/last-write times after closing it,
+  write the stream, and set the same times back (`SetFileTime`), so the stream can't change the
+  file's date on any file system or Windows version (neither the plugin nor TC set times on
+  extracted files under Wine; on Windows TC may set them after `ProcessFile` returns, which is
+  after the stream anyway).
 - Failures (unsupported volume, access denied, …) are logged (`DebugLog`) and never change the
   extraction result.
 
 ### 2.3 Format **[proposed]**
-UTF-8 without BOM, at most 4 KiB, lines separated by LF (CRLF accepted), first line a format tag,
+UTF-8 without BOM, at most 4 KiB (longer content: no stream, logged *(rev)*), lines separated by LF (CRLF accepted), first line a format tag,
 then `key=value` lines. Readers ignore unknown keys; a new incompatible format bumps the tag.
 
 ```
@@ -86,7 +98,7 @@ toc_hash=…
 | `chunk` | raw + legacy | 24 hex digits: the package's `ExportBundleData` chunk id (the source package for legacy) |
 | `toc_hash` | optional | the chunk hash from the TOC (hex), so a reader can tell whether the file was edited since |
 | `engine` | legacy | engine version the conversion used, ini spelling (`UE5_8`, `UE4_27`, …): the ini value, the prompt's answer or the auto-detected version |
-| `engine_range` | optional, raw | the engine range tcl-iostore derives from the container versions, if it has one (e.g. `UE5_6-UE5_8`) |
+| `engine_range` | optional, raw | the engine versions tcl-iostore's `$legacy` view would offer for this container (`legacy::candidates` from the TOC and container-header versions), first and last in ini spelling (e.g. `UE5_6-UE5_8`); left out when that list is empty *(rev: §8.3, Q3)* |
 
 Never written: AES keys or anything derived from them, user names beyond what the paths contain.
 
@@ -140,11 +152,17 @@ Specified in tcl-uassetvw's `SPEC.md` §6.4. In short:
   `All`; not for `PK_TEST`, `.uexp`, bulk, info file, `$chunks`; `View` writes only under a
   `_tc` folder in the temp folder; `Off` never; content round-trips; main file bytes and hash
   unchanged; packing a file with a stream gives the same chunk as without.
-- Under Wine: no stray `…:uetoc.source` file appears next to extracted files.
+- Under Wine: no stray `…:uetoc.source` file appears next to extracted files (the volume check is
+  what prevents it, §8.1) *(rev)*.
+- Main file's last-write time unchanged by the stream (`All`, NTFS) *(rev)*.
+- Text search inside a container (`WCS*.tmp` destinations): no stream, also with `All` *(rev)*.
 - TC on real Windows (Wine has no streams): F3 on a raw package inside a container with
   tcl-uassetvw installed and no last used folder → names resolved without a prompt; F3 on a
   `$legacy` unversioned file → engine "from the converter"; F5 of the same files → no stream with
   `View`, stream with `All` (`dir /r`).
+- TC on real Windows *(rev, §8.2)*: drag a package from inside a container to Explorer, and Ctrl+C
+  in the container + paste in Explorer: note the extraction folder TC uses (log) and whether the
+  pasted file carries the stream (`dir /r`).
 
 ## 7. Open questions
 
@@ -153,3 +171,57 @@ Specified in tcl-uassetvw's `SPEC.md` §6.4. In short:
 2. Should `View` also cover TC's other temp uses (e.g. "Open with" / Enter on an archive entry,
    which also extracts to `_tc`)? Proposed: yes, same folder.
 3. `engine_range` for raw packages: worth adding, or leave version logic to the viewer?
+
+## 8. Review (tcl-iostore, 2026-11-20)
+
+Question from the user: can N7 be implemented without side effects? **Yes for everything
+tcl-iostore produces** — the extracted file's bytes, size, hash and (with §2.2's time restore)
+dates, packing (N1/N2), listings — with the changes marked *(rev)* above. One user-visible effect
+remains open until checked on Windows: §8.2.
+
+### 8.1 Checked under Wine 11 / TC 11.58.1 (sandbox)
+- **F3 / Quick View** inside a container: `ProcessFile(PK_EXTRACT)` with
+  `C:\users\<user>\AppData\Local\Temp\_tc\BP_SML.uasset` (flat), as §1 says.
+- **Find Files with text** inside a container: every entry extracted to
+  `C:\users\<user>\AppData\Local\Temp\WCSxxxx.tmp` (one reused name) — not `_tc`, so `View` never
+  writes there; the file-name rule (§2.2) keeps `All` out as well.
+- **Ctrl+C** on a file inside a container: nothing is extracted at copy time (TC defers until a
+  paste; no Explorer under Wine to paste into).
+- **Named streams under Wine** (small test program, `C:` on the Wine prefix): `GetVolumeInformationW`
+  → file system "NTFS", flags `0x8a`, **no** `FILE_NAMED_STREAMS`; `std::fs::write("…\a.uasset:uetoc.source")`
+  succeeds, reads back, and leaves a second, visible file `a.uasset:uetoc.source` in the folder;
+  the main file's size, content and last-write time are unchanged.
+- **Times**: extracted files carry their extraction time (sub-second values differ per file):
+  neither the plugin nor TC sets file times on extraction there.
+- **Packing** (from the code, not a Wine run): `PackFiles` — F5 into a container, or TC's
+  "update archive" after editing an extracted file — opens sources with `std::fs::File::open`
+  (default stream only), as does N1's `ValidateOnReplace`. A stream can't reach a container.
+
+### 8.2 Open: copy out of an archive (needs real Windows)
+If TC extracts to its `_tc` folder for **drag & drop to Explorer** or **paste from clipboard**,
+the file the user drops somewhere would carry the stream (local paths of the game) and Explorer
+would show "copy without properties?" when the target is FAT/exFAT. Not checkable under Wine
+(§8.1). If confirmed, options: (a) accept — the stream is harmless and small; (b) default
+`SourceStream=Off`, uassetvw users switch it on; (c) find a narrower signal for views if TC uses a
+different folder or name pattern for drags. Decide after the Windows check; until then `View`
+stays the proposed default.
+
+### 8.3 Open questions answered
+1. **Stream name**: keep `uetoc.source`. It names the writer, the format tag inside carries the
+   version, and another tool can read it by that name; a neutral `ue.source` would suggest a
+   shared format nobody else has adopted.
+2. **`View` scope**: yes, anything TC extracts into `_tc*` under the temp folder (F3, Quick View,
+   Enter / Open with). Text search (`WCS*.tmp`) is outside it by observation.
+3. **`engine_range`**: add it. tcl-iostore already computes the candidate list for the `$legacy`
+   prompt (`legacy::candidates`), so it costs nothing and gives the viewer the same range the
+   converter would offer, instead of a second copy of that logic. Leave it out when the list is
+   empty.
+
+### 8.4 Other notes
+- `View` detection fails safe: if TC's temp folder isn't `GetTempPathW` (TEMP changed for TC),
+  nothing matches and no stream is written.
+- Performance: one extra small write per viewed package; the volume check is cached per volume.
+- Some security products log alternate-data-stream writes; the stream holds only paths and ids.
+- Side note from the PR description (Ubuntu's Wine 9.0 needs `/run/user/<uid>`): taken over into
+  `SPEC.md` §12a when N7 lands; the sandbox here runs WineHQ 11.
+
