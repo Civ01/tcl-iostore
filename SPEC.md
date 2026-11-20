@@ -25,7 +25,7 @@ real Windows is open (§13).
 ### Next goals (candidates, to be ordered with the user)
 | # | Goal | Scope | Size | Notes |
 |---|---|---|---|---|
-| N1 | **Packing, raw** | Raw Zen files into containers: replace/delete in existing containers, new patch containers from game files; writer in `iostore` | large | **Done 2026-11-19 (§6b)**, Configure dialog 2026-11-20. **N1b (highest backburner): replace with addition** (new packages) |
+| N1 | **Packing, raw** | Raw Zen files into containers: replace/delete in existing containers, new patch containers from game files; writer in `iostore` | large | **Done 2026-11-19 (§6b)**, Configure dialog 2026-11-20. **N1b done 2026-11-20 (§6c)**: new files (5.3+), ValidateOnAdd, uepak-style mount-point question; `PackMode` removed |
 | N2 | **Packing, legacy input** | Legacy `.uasset/.uexp/.ubulk` converted to Zen on pack (retoc `to-zen`), auto-detected, else asked once per copy session **[decided]** | large | Needs the global's script objects (already mandatory) and an engine version for the target; Zen header-size field per version (§6a.2) |
 | N3 | **Legacy conversion on extract** | Hidden `$legacy` folder: Zen packages as legacy `.uasset/.uexp/.ubulk…`, rebuilt shader libraries, `scriptobjects.bin` (retoc `to-legacy`) | medium | Done, incl. N3b (UE 5.8 shader hashes, §6a.1) |
 | N4 | **Custom game support** | Game profiles ported from CUE4Parse (keys, custom encryption, block layouts, magics); per-folder profile, offered on a read failure **[decided]** | medium per game | Hook in place (§2.2); needs the user's game-specific samples |
@@ -37,7 +37,8 @@ Order **[decided 2026-11-19]**: **N3** (part of reading) → **N1** (packing raw
 N4/N5 when samples or a new engine appear; N6 when convenient. N1 starts with its own spec round.
 
 ### Non-goals
-- Packing anything that isn't already in the game (until N1b) or isn't a raw Zen file (N2).
+- Packing raw Zen files that aren't packages or bulk files and that the game doesn't have (shader
+  libraries etc.), new packages for pre-5.3 games, and anything that isn't a raw Zen file (N2).
 - UE 4.25/4.26 containers (TOC v1/v2): may happen to work, not tested or promised.
 - On-demand containers (`OnDemand` flag, `.uondemandtoc`): listed if possible, data read
   refused with a clear message **[proposed]**.
@@ -396,15 +397,13 @@ containers, reuses its chunk ID and container-header store entry, skips the rest
 empty `.pak` next to its container).
 
 **What may be packed** **[decided]**
-- `PackMode=ReplaceOnly` (default; the only implemented mode): every file must exist in the game
-  with the same path (mount point + path): in the target container, else in any container under the
-  global's folder (the legacy view's store). Its chunk ID and, for packages, its store entry
-  (imported packages, shader map hashes) are reused unchanged. The new data replaces the chunk.
-- `PackMode=ReplaceWithAddition`: **dummy for now** (accepted in ini and dialog, behaves as
-  ReplaceOnly, logged). Backburner **N1b, highest priority**: new packages, chunk ID from the
-  package name, store entry derived (5.3+ imports from the Zen header; no shader maps, warning).
+- Files the game has, with the same path (mount point + path): in the target container, else in
+  any container under the global's folder (the legacy view's store). Their chunk ID and, for
+  packages, their store entry (imported packages, shader map hashes) are reused (checked by
+  `ValidateOnReplace`, §6b.1). The new data replaces the chunk.
+- Files the game doesn't have: N1b, §6c (`PackMode` was removed with it; old ini lines are ignored).
 - **Refused, whole copy cancelled, one message listing the files** **[decided]**:
-  - files the game doesn't have (ReplaceOnly);
+  - files the game doesn't have that aren't packages or bulk files (§6c);
   - files that live in the companion `.pak`, not in IoStore (`.ini`, `.locres`, `AssetRegistry.bin`,
     `.uplugin`, `.uproject`, …: anything that isn't a package, bulk file or shader library);
   - legacy cooked files (`.uasset` with the legacy magic, or `.uasset` + `.uexp`): N2;
@@ -447,7 +446,7 @@ algorithm), directory index (encrypted when the container is), partitions, meta 
 signature data dropped. Container header (de)serialized with the fork's `retoc::container_header`.
 
 **Configure dialog** (packing part) **[done 2026-11-20, see As built]**: compression (Match game / methods + level),
-block size, PackMode (ReplaceOnly / ReplaceWithAddition — "later"), Compact, AutoCompactUnder,
+block size, ValidateOnAdd (was PackMode, §6c), ValidateOnReplace, Compact, AutoCompactUnder,
 UndoLimit, WriteEmptyPak, mount point for new containers, WarnPakNeeded.
 
 **Tests** **[proposed]**: round trips on every sample (extract raw → replace all → container reads
@@ -527,6 +526,61 @@ Isle 36,574 packages, G1R, all samples, `VALIDATE_SELF`); each mode on every sam
 package's bytes under another's name (`validate_on_replace_modes`). TC (2026-11-20): Warn prompt
 (No → nothing written, TC's "User abort!" after it), Fix report, dialog row.
 
+## 6c. New files (N1b) **[done 2026-11-20]**
+
+Decided with the user 2026-11-20 (UnrealReZen copies the game's store entries and supports no new
+packages; this goes further).
+
+**What a new file gets**
+- **Package** (`.uasset`/`.umap`, Zen, not in the game): chunk id = the package id of the name
+  **inside** the package (the loader looks packages up by name: `FPackageId::FromName` in
+  `AsyncLoading2.cpp`, `FilePackageStore` by id only; the directory-index path plays no part in
+  loading). Store entry: imported packages = the package's own `ImportedPackageNames` (cooked 5.3+
+  packages always carry them), no shader-map hashes, no soft references; a file copied from another
+  container keeps that container's entry (as before). Tests: on 18 sample games (5.3–5.8, G1R) the
+  rebuilt entry equals the cook's.
+- **Bulk file** (`.ubulk` / `.uptnl` / `.m.ubulk`): pure payload laid out by its package's
+  bulk-data map, so it must come from the same cook. Chunk id = the package's id, index 0, kind
+  BulkData / OptionalBulkData / MemoryMappedBulkData (checked on the samples and ARK); `.m.ubulk`
+  is written memory-mapped (16 KiB aligned). No store entry.
+- **Path:** where the file was dropped (TC's archive path through the mount point, as for
+  replaces).
+- **Mount point:** when copied or new files fall outside it, it becomes the deepest common folder
+  of the old one and all files, only the index is rewritten (tcl-uepak §4.2.1), and the question
+  below shows it with an example (first existing entry before/after, where the game finds it,
+  where the added files go).
+
+**Hard refusals** (whole copy, one message; no option): new packages in a pre-5.3 game (the
+package doesn't name its imports), files that aren't Zen packages of this game, a package whose
+name the game already has elsewhere ("drop it there to replace it"), bulk data whose package is
+neither in the game nor in the same copy, other new chunk files (shader libraries …).
+
+**One question per copy** (TC calls `PackFiles` once per F5/Alt+F5, so it resets with every
+copy): whenever a copy adds new files — existing container: "Adding new files to an existing
+container may lead to unpredictable results."; new container: "This new container gets files the
+game doesn't have …" — and whenever the mount point has to change. It lists the new files, the
+ValidateOnAdd findings (Warn) or moves (Fix) and the mount-point block; No writes nothing. Copies of
+game files into a new container (the N1 patch-container case) ask nothing.
+
+**`[Pack] ValidateOnAdd=Warn|Fix|Error|Off`** (default Warn; Configure dialog "On add"):
+- path vs the package name inside: `<X>/Content/…` → `/Game/…`, `Engine/Content/…` → `/Engine/…`,
+  `…/Plugins/…/<P>/Content/…` → `/<P>/…`. A mismatch loads (by name) but breaks discovery by path
+  (mod loaders scanning a folder, tools). Fix moves the file — and its bulk files — to the path the
+  name gives (the drop's content folder when the root matches, else a game folder with that root);
+  `[fixable]` marks it under Warn.
+- materials (main export class `Material` / `MaterialInstanceConstant`): no shader maps can be
+  built (its shader library isn't packed), reported, not fixable.
+- Warn: findings in the question; Fix: moved files listed in the question (no report afterwards,
+  the question already showed them); Error: whole copy refused; Off: no checks.
+
+**Tests** (`pack_tests.rs`): `new_package_is_added_with_a_derived_entry` (every sample game: a
+package deleted from a copy and packed back: same chunk id, data, path, imports = the cook's; No →
+nothing written; pre-5.3 → refused), `validate_on_add_modes` (one folder too deep, each mode),
+`new_files_mount_point_and_new_container` (package from a container with another mount point:
+question with the mount block, existing files keep their game paths; new container with a new
+file asks), `bulk_files_follow_their_package` (synthetic `.ubulk`/`.m.ubulk`: ids, memory-mapped
+flag, refusal alone). No 5.3+ sample has real bulk files.
+
 ## 7. AES keys **[decided]**: own file
 `uetoc.keys.json` in the settings directory, same format, lookup order (folder/parent folder →
 same non-zero GUID → dialog), dialog, "session only" checkbox and changed-key wording as uepak
@@ -551,7 +605,7 @@ LegacyEngineVersion=Auto    ; Auto | UE4_27 | UE5_0 … UE5_8 (§6a)
 LegacyGuessScriptTypes=0    ; 1 = ScriptStruct/Enum by name for top-level script imports (§6a.2)
 SourceStream=View           ; View (packages viewed or dragged out) | All (every extracted file) | Off (N7)
 [Pack] (N1, §6b)
-PackMode=ReplaceOnly        ; ReplaceOnly | ReplaceWithAddition (later: N1b; acts as ReplaceOnly)
+ValidateOnAdd=Warn          ; Warn | Fix | Error | Off (§6c)
 Compression=Match           ; Match | None | Zlib | Gzip | LZ4 | Oodle
 ZlibLevel=6 / OodleCompressor=Kraken / OodleLevel=Normal
 WriteEmptyPak=1             ; new containers: write an empty companion .pak
@@ -698,6 +752,13 @@ on it fixes that, found in tcl-uassetvw):
   `Temp\_tc\BP_SML.uasset`, scope matched, log "volume c:\ named streams: false (flags 0x8a)", no
   stream and no stray `BP_SML.uasset:uetoc.source` file (Wine would create one without the volume
   check, proposal §8.1). Real streams are tested on Windows CI (NTFS).
+
+- **N1b (2026-11-20)**: F8 `BP_Monitor` from `pakchunk11` (the game no longer has it), then F5
+  of `C:\src\Moadra` (BP_SML + 14 other game files + BP_Monitor) onto `pakchunk2` (mount
+  `…/Mods/DebugInfo/`): one question with "New files (1)", the mount block (→ `…/Content/Mods/`,
+  example `Components/Tests/BPC_Player_Test.uasset → DebugInfo/…`), Yes → 15 copies + 1 new,
+  `Mods\DebugInfo` and `Mods\SML` listed. Wine's dialog font shows "→" as a box (Windows fonts
+  have it). Configure: "On add" / "On replace" rows.
 
 ## 13. Open items
 - Short check on real Windows (§12a was done under Wine): dialog layout/fonts, install from

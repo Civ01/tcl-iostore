@@ -26,14 +26,18 @@ pub const ATTR_SYSTEM: u32 = 0x4;
 
 pub const DEFAULT_GLOBAL_LOOKUP_LIMIT: u32 = 5;
 
-/// `[Pack] PackMode` (SPEC §6b).
+/// `[Pack] ValidateOnAdd` (SPEC §6c): checks for files the game doesn't have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum PackMode {
-    /// Every file must exist in the game; its chunk ID and store entry are reused.
+pub enum ValidateOnAdd {
+    /// List the findings in the additions question.
     #[default]
-    ReplaceOnly,
-    /// N1b (not implemented yet): behaves as ReplaceOnly.
-    ReplaceWithAddition,
+    Warn,
+    /// Move files to the path their name gives (with their bulk files).
+    Fix,
+    /// Refuse the copy when anything is found.
+    Error,
+    /// No checks.
+    Off,
 }
 
 /// `[Pack] Compression`.
@@ -77,7 +81,6 @@ pub enum ValidateOnReplace {
 /// `[Pack]` options.
 #[derive(Debug, Clone)]
 pub struct PackOptions {
-    pub mode: PackMode,
     pub compression: PackCompression,
     /// Zlib/gzip level 0–9.
     pub zlib_level: u32,
@@ -94,12 +97,12 @@ pub struct PackOptions {
     /// New containers: `Auto` (UE: common root of the files) or a mount point.
     pub new_mount_point: Option<String>,
     pub validate_on_replace: ValidateOnReplace,
+    pub validate_on_add: ValidateOnAdd,
 }
 
 impl Default for PackOptions {
     fn default() -> Self {
         PackOptions {
-            mode: PackMode::default(),
             compression: PackCompression::default(),
             zlib_level: 6,
             oodle_compressor: iostore::write::OodleCompressor::Kraken,
@@ -110,6 +113,7 @@ impl Default for PackOptions {
             auto_compact_under: 10 << 20,
             new_mount_point: None,
             validate_on_replace: ValidateOnReplace::Warn,
+            validate_on_add: ValidateOnAdd::Warn,
         }
     }
 }
@@ -423,17 +427,18 @@ fn parse_pack_option(opts: &mut Options, key: &str, raw: &str) {
     let lower = raw.to_ascii_lowercase();
     let p = &mut opts.pack;
     let ok = match key {
-        "packmode" => match lower.as_str() {
-            "replaceonly" => {
-                p.mode = PackMode::ReplaceOnly;
-                true
-            }
-            "replacewithaddition" => {
-                p.mode = PackMode::ReplaceWithAddition;
-                true
-            }
-            _ => false,
-        },
+        // removed with N1b (additions always ask once per copy): old lines are ignored
+        "packmode" => true,
+        "validateonadd" => {
+            let v = match lower.as_str() {
+                "warn" => Some(ValidateOnAdd::Warn),
+                "fix" => Some(ValidateOnAdd::Fix),
+                "error" => Some(ValidateOnAdd::Error),
+                "off" => Some(ValidateOnAdd::Off),
+                _ => None,
+            };
+            v.map(|v| p.validate_on_add = v).is_some()
+        }
         "compression" => {
             let c = match lower.as_str() {
                 "match" | "auto" => Some(PackCompression::Match),
@@ -527,15 +532,17 @@ mod tests {
         assert_eq!(parse_options("[Options]\nLegacyEngineVersion=Auto").legacy_engine_version, None);
         assert!(!parse_options("[Options]").legacy_guess_script_types);
         assert!(parse_options("[Options]\nLegacyGuessScriptTypes=1").legacy_guess_script_types);
-        let p = parse_options("[Pack]\nPackMode=ReplaceWithAddition\nCompression=Oodle ; c\nOodleLevel=Optimal2\nWriteEmptyPak=0\nAutoCompactUnder=2M\nNewMountPoint=..\\..\\..\\Game\\").pack;
-        assert_eq!(p.mode, PackMode::ReplaceWithAddition);
+        let o = parse_options("[Pack]\nPackMode=ReplaceWithAddition\nValidateOnAdd=Fix\nCompression=Oodle ; c\nOodleLevel=Optimal2\nWriteEmptyPak=0\nAutoCompactUnder=2M\nNewMountPoint=..\\..\\..\\Game\\");
+        assert!(o.warnings.is_empty(), "old PackMode lines are ignored: {:?}", o.warnings);
+        let p = o.pack;
+        assert_eq!(p.validate_on_add, ValidateOnAdd::Fix);
         assert_eq!(p.compression, PackCompression::Oodle);
         assert_eq!(p.oodle_level, iostore::write::OodleLevel::Optimal2);
         assert!(!p.write_empty_pak && p.warn_pak_needed);
         assert_eq!(p.auto_compact_under, 2 << 20);
         assert_eq!(p.new_mount_point.as_deref(), Some("../../../Game/"));
         let d = parse_options("").pack;
-        assert_eq!((d.mode, d.compression, d.auto_compact_under), (PackMode::ReplaceOnly, PackCompression::Match, 10 << 20));
+        assert_eq!((d.validate_on_add, d.compression, d.auto_compact_under), (ValidateOnAdd::Warn, PackCompression::Match, 10 << 20));
         assert_eq!(parse_options("[Pack]\nCompression=Zstd").warnings.len(), 1);
     }
 

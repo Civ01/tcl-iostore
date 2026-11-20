@@ -477,7 +477,7 @@ mod imp {
     // ---- packing settings (ConfigurePacker)
 
     use crate::pack_settings::{
-        PackForm, COMPRESSIONS, MODES, OODLE_COMPRESSORS, OODLE_LEVELS, VALIDATIONS, ZLIB_LEVELS,
+        PackForm, ADD_VALIDATIONS, COMPRESSIONS, OODLE_COMPRESSORS, OODLE_LEVELS, VALIDATIONS, ZLIB_LEVELS,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::EnableWindow;
 
@@ -521,7 +521,7 @@ mod imp {
         let mut t = Tpl::dialog("UE IoStore plugin: packing settings", 320, 279);
         // what and how
         t.item(BUTTON, BS_GROUPBOX, 7, 4, 306, 83, NONE, "Packing");
-        t.item(STATIC, 0, 14, 18, 64, 9, NONE, "&Mode:");
+        t.item(STATIC, 0, 14, 18, 64, 9, NONE, "On &add:");
         t.item(COMBOBOX, list, 80, 16, 226, 80, ID_PMODE, "");
         t.item(STATIC, 0, 14, 35, 64, 9, NONE, "&Compression:");
         t.item(COMBOBOX, list, 80, 33, 90, 120, ID_PCOMP, "");
@@ -539,7 +539,7 @@ mod imp {
         t.item(STATIC, 0, 14, 52, 64, 9, ID_POODLELABEL, "&Oodle:");
         t.item(COMBOBOX, list, 80, 50, 90, 120, ID_POODLEC, "");
         t.item(COMBOBOX, list, 178, 50, 128, 160, ID_POODLEL, "");
-        t.item(STATIC, 0, 14, 69, 64, 9, NONE, "&Validation:");
+        t.item(STATIC, 0, 14, 69, 64, 9, NONE, "On &replace:");
         t.item(COMBOBOX, list, 80, 67, 226, 80, ID_PVALID, "");
         // existing containers
         t.item(
@@ -672,7 +672,7 @@ mod imp {
 
     unsafe fn read_form(hwnd: HWND) -> PackForm {
         PackForm {
-            mode: sel(hwnd, ID_PMODE),
+            validate_add: sel(hwnd, ID_PMODE),
             compression: sel(hwnd, ID_PCOMP),
             zlib_level: sel(hwnd, ID_PZLIB),
             oodle_compressor: sel(hwnd, ID_POODLEC),
@@ -706,7 +706,7 @@ mod imp {
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, lp);
                 let st = &*(lp as *const PState);
                 let f = &st.form;
-                fill(hwnd, ID_PMODE, MODES.iter().map(|m| m.0), f.mode);
+                fill(hwnd, ID_PMODE, ADD_VALIDATIONS.iter().map(|m| m.0), f.validate_add);
                 fill(
                     hwnd,
                     ID_PCOMP,

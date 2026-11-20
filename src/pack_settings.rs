@@ -2,18 +2,14 @@
 //! back, with validation, and the ini lines written on OK. The Win32 dialog itself is in
 //! `dialog.rs`; everything here is plain data so it is unit-tested.
 
-use crate::config::{parse_size, PackCompression, PackMode, PackOptions, ValidateOnReplace};
+use crate::config::{parse_size, PackCompression, PackOptions, ValidateOnAdd, ValidateOnReplace};
 use iostore::write::{OodleCompressor, OodleLevel};
 
-pub const MODES: [(&str, PackMode); 2] = [
-    (
-        "Replace only: files must already exist in the game",
-        PackMode::ReplaceOnly,
-    ),
-    (
-        "Replace with addition (not yet: acts as Replace only)",
-        PackMode::ReplaceWithAddition,
-    ),
+pub const ADD_VALIDATIONS: [(&str, ValidateOnAdd); 4] = [
+    ("Warn: list problems in the question", ValidateOnAdd::Warn),
+    ("Fix: move files to the path their name gives", ValidateOnAdd::Fix),
+    ("Error: refuse the copy", ValidateOnAdd::Error),
+    ("Off: no checks", ValidateOnAdd::Off),
 ];
 
 pub const COMPRESSIONS: [(&str, PackCompression); 6] = [
@@ -56,7 +52,8 @@ pub const ZLIB_LEVELS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8"
 /// What the dialog shows: list indices, check boxes and edit texts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackForm {
-    pub mode: usize,
+    /// ValidateOnAdd.
+    pub validate_add: usize,
     pub compression: usize,
     pub zlib_level: usize,
     pub oodle_compressor: usize,
@@ -77,7 +74,7 @@ fn index_of<T: PartialEq + Copy>(list: &[(&str, T)], v: T) -> usize {
 impl PackForm {
     pub fn from_options(p: &PackOptions) -> Self {
         PackForm {
-            mode: index_of(&MODES, p.mode),
+            validate_add: index_of(&ADD_VALIDATIONS, p.validate_on_add),
             compression: index_of(&COMPRESSIONS, p.compression),
             zlib_level: (p.zlib_level as usize).min(9),
             oodle_compressor: index_of(&OODLE_COMPRESSORS, p.oodle_compressor),
@@ -107,7 +104,7 @@ impl PackForm {
             )
         })?;
         Ok(PackOptions {
-            mode: MODES[pick(self.mode, MODES.len(), "pack mode")?].1,
+            validate_on_add: ADD_VALIDATIONS[pick(self.validate_add, ADD_VALIDATIONS.len(), "check for added files")?].1,
             compression: COMPRESSIONS[pick(self.compression, COMPRESSIONS.len(), "compression")?].1,
             zlib_level: pick(self.zlib_level, ZLIB_LEVELS.len(), "Zlib level")? as u32,
             oodle_compressor: OODLE_COMPRESSORS[pick(
@@ -173,9 +170,11 @@ pub fn format_size(n: u64) -> String {
 
 /// The `[Pack]` lines for `p`, in the names and spellings `uetoc.ini` uses.
 pub fn ini_values(p: &PackOptions) -> Vec<(&'static str, String)> {
-    let mode = match p.mode {
-        PackMode::ReplaceOnly => "ReplaceOnly",
-        PackMode::ReplaceWithAddition => "ReplaceWithAddition",
+    let add = match p.validate_on_add {
+        ValidateOnAdd::Warn => "Warn",
+        ValidateOnAdd::Fix => "Fix",
+        ValidateOnAdd::Error => "Error",
+        ValidateOnAdd::Off => "Off",
     };
     let compression = match p.compression {
         PackCompression::Match => "Match",
@@ -187,7 +186,7 @@ pub fn ini_values(p: &PackOptions) -> Vec<(&'static str, String)> {
     };
     let b = |v: bool| if v { "1" } else { "0" }.to_string();
     vec![
-        ("PackMode", mode.into()),
+        ("ValidateOnAdd", add.into()),
         ("Compression", compression.into()),
         ("ZlibLevel", p.zlib_level.to_string()),
         (
@@ -244,10 +243,10 @@ mod tests {
     #[test]
     fn every_choice_survives_the_ini() {
         let shipped = include_str!("../uetoc.ini");
-        for mode in 0..MODES.len() {
+        for mode in 0..ADD_VALIDATIONS.len() {
             for compression in 0..COMPRESSIONS.len() {
                 let form = PackForm {
-                    mode,
+                    validate_add: mode,
                     compression,
                     zlib_level: (compression + 3) % 10,
                     oodle_compressor: compression % OODLE_COMPRESSORS.len(),
@@ -285,7 +284,6 @@ mod tests {
         let shipped = include_str!("../uetoc.ini");
         let opts = PackOptions {
             compression: PackCompression::Oodle,
-            mode: PackMode::ReplaceWithAddition,
             new_mount_point: Some("../../../Game/Content/Mods/WithAVeryLongName/".into()),
             ..PackOptions::default()
         };
@@ -299,19 +297,13 @@ mod tests {
         );
         // a value that reaches the comment column: one space before the comment
         assert!(
-            text.contains("\r\nPackMode=ReplaceWithAddition ; ReplaceOnly;"),
-            "{text}"
-        );
-        assert!(
             text.contains("\r\nNewMountPoint=../../../Game/Content/Mods/WithAVeryLongName/ ; "),
             "{text}"
         );
-        // a shorter value: the comment keeps its column
-        let t = set_value_text(&text, "Pack", "PackMode", "ReplaceOnly");
-        assert!(
-            t.contains("\r\nPackMode=ReplaceOnly        ; ReplaceOnly;"),
-            "{t}"
-        );
+        // a shorter value again: the comment returns to the file's usual column
+        let t = set_value_text(&text, "Pack", "NewMountPoint", "Auto");
+        assert!(t.contains("\r\nNewMountPoint=Auto          ; new container"), "{t}");
+        assert!(text.contains("\r\nValidateOnAdd=Warn          ; new files"), "{text}");
         assert_eq!(text.matches("[Pack]").count(), 1);
         assert_eq!(text.matches("[Options]").count(), 1);
         assert_eq!(text.lines().count(), shipped.lines().count());

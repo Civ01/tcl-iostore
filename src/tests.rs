@@ -180,7 +180,7 @@ fn mount_point_views_and_chunks_folder() {
     let names: Vec<&str> = items.iter().map(|h| h.name.as_str()).collect();
     assert_eq!(&names[..4], ["Moadra", "Moadra\\Content", "Moadra\\Content\\Mods", "Moadra\\Content\\Mods\\DebugInfo"]);
     assert!(items[..4].iter().all(|h| h.attr == FILE_ATTR_DIRECTORY | config::ATTR_HIDDEN as c_int));
-    assert!(names.iter().filter(|n| !n.starts_with("$chunks")).skip(4).all(|n| n.starts_with("Moadra\\Content\\Mods\\DebugInfo\\")));
+    assert!(names.iter().filter(|n| !n.starts_with("$chunks") && !n.starts_with("$legacy")).skip(4).all(|n| n.starts_with("Moadra\\Content\\Mods\\DebugInfo\\")));
     let chunks_dir = items.iter().find(|h| h.name == archive::CHUNKS_DIR).expect("$chunks folder");
     assert_eq!(chunks_dir.attr, FILE_ATTR_DIRECTORY | config::ATTR_HIDDEN as c_int);
     assert!(names.contains(&"$chunks\\b53fffed16aaad1300000006.ContainerHeader"), "{names:?}");

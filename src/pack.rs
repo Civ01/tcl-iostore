@@ -1,14 +1,14 @@
 //! Packing raw Zen files (N1, SPEC §6b).
 //!
-//! Every packed file must already exist in the game (`PackMode=ReplaceOnly`): in the target
-//! container it is replaced in place (chunk ID, path and store entry stay); found only in another
-//! container under the global's folder it is added to the target with that container's chunk ID,
-//! path and (for packages) store entry. Anything else cancels the whole copy with one message.
+//! A packed file the game has is replaced in place in the target container (chunk ID, path and
+//! store entry stay) or, found only in another container under the global's folder, added with
+//! that container's chunk ID, path and (for packages) store entry. New packages and their bulk
+//! files (N1b, SPEC §6c) are planned in [`crate::add`]. Anything else cancels the whole copy.
 //! New containers take their format from the game. The container edit itself is
 //! [`iostore::edit::ContainerEdit`]: new data is appended, the `.utoc` replaced last, an undo file
 //! kept while writing.
 
-use crate::config::{MountPointMode, Options, PackCompression, PackMode, PackOptions, ValidateOnReplace};
+use crate::config::{MountPointMode, Options, PackCompression, PackOptions, ValidateOnAdd, ValidateOnReplace};
 use crate::dlog;
 use crate::view::Mount;
 use iostore::edit::{ContainerEdit, NewContainer, UndoRecord, partition_path, strip_prefix_ignore_case};
@@ -243,6 +243,35 @@ pub enum Op {
     Replace { index: usize },
     /// Chunk from elsewhere in the game, added with its id and path (relative to the game root).
     Add { from: GameFile },
+    /// A file the game doesn't have (N1b, SPEC §6c): its full game path, its store entry
+    /// (packages), memory-mapped (`.m.ubulk`).
+    New { full: String, entry: Option<retoc::container_header::StoreEntry>, memory_mapped: bool },
+}
+
+impl Step {
+    /// Full game path the step puts its file at (copies and new files).
+    pub fn full(&self) -> Option<&str> {
+        match &self.op {
+            Op::Replace { .. } => None,
+            Op::Add { from } => from.full.as_deref(),
+            Op::New { full, .. } => Some(full),
+        }
+    }
+}
+
+/// The mount point `edit` needs so that every copied or new file fits (`None`: unchanged):
+/// the deepest common folder of the current one and all of them (as tcl-uepak).
+pub fn mount_change(edit: &ContainerEdit, steps: &[Step]) -> Option<String> {
+    let m = edit.mount_point()?;
+    let fulls: Vec<&str> = steps.iter().filter_map(Step::full).collect();
+    if fulls.iter().all(|f| strip_prefix_ignore_case(f, m).is_some()) {
+        return None;
+    }
+    let mut all: Vec<String> = edit.chunks().filter_map(|(_, _, p)| p.map(|p| format!("{m}{p}"))).collect();
+    all.push(m.to_string());
+    all.extend(fulls.iter().map(|s| s.to_string()));
+    let root = iostore::common_root_path(all.iter().map(String::as_str));
+    (!root.eq_ignore_ascii_case(m)).then_some(root)
 }
 
 #[derive(Debug, Clone)]
@@ -278,7 +307,7 @@ impl Refusals {
                 s.push_str(&format!("  … and {} more\n", v.len() - 15));
             }
         };
-        list(&mut s, "Not in the game (only files the game already has can be packed)", &self.not_in_game);
+        list(&mut s, "Not in the game, and not a package or bulk file (shader libraries and other chunk files can only replace the game's)", &self.not_in_game);
         list(&mut s, "Belong in the companion .pak, not in IoStore", &self.companion_pak);
         list(&mut s, "Legacy cooked files (.uasset/.uexp): packing them comes later; use the raw Zen files", &self.legacy);
         list(&mut s, "Read-only ($legacy view, the global container, the container header)", &self.read_only);
@@ -315,9 +344,10 @@ fn archive_game_key(archive_path: &str, mode: MountPointMode, target_mount: Opti
 }
 
 /// Classifies every input. `target` is the open edit (`None` for a new container).
-pub fn plan(inputs: &[Input], game: &Game, utoc: &Path, target: Option<&ContainerEdit>, mode: MountPointMode) -> (Vec<Step>, Refusals) {
+pub fn plan(inputs: &[Input], game: &Game, utoc: &Path, target: Option<&ContainerEdit>, mode: MountPointMode) -> (Vec<Step>, Refusals, Vec<crate::add::Candidate>) {
     let mut steps = Vec::new();
     let mut r = Refusals::default();
+    let mut new = Vec::new();
     let target_mount = target.and_then(|t| t.mount_point());
     // target's own files by game key and id
     let mut own: HashMap<String, (usize, ChunkId)> = HashMap::new();
@@ -366,13 +396,22 @@ pub fn plan(inputs: &[Input], game: &Game, utoc: &Path, target: Option<&Containe
             steps.push(Step { input: input.clone(), op: Op::Add { from: f.clone() }, id: f.id });
         } else if game.in_global(&key) {
             r.read_only.push(shown);
+        } else if matches!(crate::add::ext_of(&key).as_str(), "uasset" | "umap" | "ubulk" | "uptnl" | "m.ubulk") {
+            // not in the game: a new file (N1b, SPEC §6c)
+            let rel = shown.replace('\\', "/");
+            let full = match (mode, target_mount) {
+                (MountPointMode::Root, Some(m)) => format!("{m}{rel}"),
+                (_, Some(m)) => format!("{}{rel}", crate::view::Mount::parse(m).base),
+                (_, None) => format!("../../../{rel}"),
+            };
+            new.push(crate::add::Candidate { input: input.clone(), full });
         } else if is_iostore_type(&key) {
             r.not_in_game.push(shown);
         } else {
             r.companion_pak.push(shown);
         }
     }
-    (steps, r)
+    (steps, r, new)
 }
 
 // ---------------------------------------------------------------------------
@@ -527,16 +566,10 @@ fn apply(
         let mut cache = HeaderCache::default();
         let (mut replaced, mut added) = (0, 0);
         let target_mount = edit.mount_point().map(String::from);
-        // mount point that covers every added file
-        if let Some(m) = &target_mount {
-            let fulls: Vec<&str> = steps.iter().filter_map(|s| if let Op::Add { from } = &s.op { from.full.as_deref() } else { None }).collect();
-            if fulls.iter().any(|f| strip_prefix_ignore_case(f, m).is_none()) {
-                let mut all: Vec<String> = edit.chunks().filter_map(|(_, _, p)| p.map(|p| format!("{m}{p}"))).collect();
-                all.extend(fulls.iter().map(|s| s.to_string()));
-                let root = iostore::common_root_path(all.iter().map(String::as_str));
-                dlog!("  mount point {m:?} -> {root:?} (added files outside it)");
-                edit.set_mount_point(&root)?;
-            }
+        // mount point that covers every copied or new file (asked about before)
+        if let (Some(m), Some(root)) = (&target_mount, mount_change(&edit, steps)) {
+            dlog!("  mount point {m:?} -> {root:?} (files outside it)");
+            edit.set_mount_point(&root)?;
         }
         let mount = edit.mount_point().map(String::from);
         for s in steps {
@@ -549,6 +582,23 @@ fn apply(
                     if let (Some(fixed), Some((_, h))) = (fixes.get(&s.id), &mut header) {
                         h.add_package(retoc::FPackageId(s.id.id64()), fixed.clone());
                         header_changed = true;
+                    }
+                }
+                Op::New { full, entry, memory_mapped } => {
+                    let rel = match &mount {
+                        Some(m) => Some(strip_prefix_ignore_case(full, m).ok_or_else(|| PackError::Failed(format!("{full} is outside {m}")))?.to_string()),
+                        None => None,
+                    };
+                    edit.add(s.id, rel, &mut f, s.input.len, compressor, *memory_mapped, &mut cancel)?;
+                    added += 1;
+                    if let Some(entry) = entry {
+                        match &mut header {
+                            Some((_, h)) => {
+                                h.add_package_with_soft_references(retoc::FPackageId(s.id.id64()), entry.clone(), Vec::new()).map_err(|e| PackError::Failed(format!("{e:#}")))?;
+                                header_changed = true;
+                            }
+                            None => return Err(PackError::Failed("the target container has no container header for the new package".into())),
+                        }
                     }
                 }
                 Op::Add { from } => {
@@ -669,6 +719,7 @@ pub fn validate_steps(steps: &[Step], game: &Game, utoc: &Path, target_header: O
         let (src_utoc, index) = match &s.op {
             Op::Replace { index } => (utoc.to_path_buf(), *index as u32),
             Op::Add { from } => (from.utoc.clone(), from.index),
+            Op::New { .. } => continue,
         };
         let Some(gc) = game.containers.iter().find(|c| same_path(&c.utoc, &src_utoc)) else { continue };
         if !is_package(&s.id, gc.version) {
@@ -680,6 +731,7 @@ pub fn validate_steps(steps: &[Step], game: &Game, utoc: &Path, target_header: O
         let header = match &s.op {
             Op::Replace { .. } => target_header,
             Op::Add { from } => cache.get(&from.utoc).ok().flatten(),
+            Op::New { .. } => continue,
         };
         let Some(header) = header else { continue };
         let (hv, Some(entry)) = (header.version, header.get_store_entry(package)) else { continue };
@@ -785,6 +837,82 @@ fn report_fixes(v: &Validation) {
     if open > 0 { crate::win::warn(&text) } else { crate::win::info(&text) }
 }
 
+// ---------------------------------------------------------------------------
+// N1b: new files (SPEC §6c)
+
+/// The container-header version of the game (any non-global container's header).
+fn game_header_version(game: &Game) -> Option<retoc::container_header::EIoContainerHeaderVersion> {
+    for c in game.containers.iter().filter(|c| !c.is_global) {
+        let Ok(container) = open_quiet(&c.utoc) else { continue };
+        if let Ok(Some((_, h))) = read_header(&container) {
+            return Some(h.version);
+        }
+    }
+    None
+}
+
+/// Plans the new files of a copy (`header`: the target's container-header version, if known).
+fn plan_new_files(cands: &[crate::add::Candidate], game: &Game, toc: TocVersion, header: Option<retoc::container_header::EIoContainerHeaderVersion>, mode: ValidateOnAdd) -> crate::add::NewPlan {
+    if cands.is_empty() {
+        return crate::add::NewPlan::default();
+    }
+    let header = header.or_else(|| game_header_version(game));
+    let package_in_game = |id: u64| -> Option<String> {
+        let chunk = ChunkId::create(id, 0, ChunkKind::ExportBundleData, toc)?;
+        let files = game.by_id.get(&chunk)?;
+        Some(files.iter().find_map(|f| f.full.as_deref().map(|p| crate::add::visible(p).to_string())).unwrap_or_else(|| format!("{} in {}", chunk.hex(), files[0].utoc.display())))
+    };
+    let id_at_path = |key: &str| -> Option<u64> { game.by_path.get(key)?.iter().find(|f| is_package(&f.id, toc)).map(|f| f.id.id64()) };
+    let visibles: Vec<String> = game.by_path.values().flatten().filter_map(|f| f.full.as_deref().map(|p| crate::add::visible(p).to_string())).collect();
+    let view = crate::add::GameView { toc, header, package_in_game: &package_in_game, id_at_path: &id_at_path, visibles: &visibles };
+    let plan = crate::add::plan_new(cands, &view, mode);
+    for f in &plan.findings {
+        dlog!("  add {}: {}", f.file, f.issue.describe());
+    }
+    for (f, r) in &plan.refused {
+        dlog!("  add {f}: refused: {r}");
+    }
+    plan
+}
+
+/// Refusals and `ValidateOnAdd=Error` for the new files, before anything is asked or written.
+fn check_new_files(plan: &crate::add::NewPlan, mode: ValidateOnAdd) -> Result<(), PackError> {
+    if !plan.refused.is_empty() {
+        return Err(PackError::User(crate::add::refused_text(&plan.refused)));
+    }
+    if mode == ValidateOnAdd::Error && !plan.findings.is_empty() {
+        return Err(PackError::User(format!(
+            "Nothing was packed. These new files don't fit the game (ValidateOnAdd=Error):\n\n{}\n(Fix moves files to the path their name gives; Warn lists the findings and asks; Off packs without checks.)",
+            crate::add::findings_text(&plan.findings, false)
+        )));
+    }
+    Ok(())
+}
+
+/// The one question for a copy with new files and/or a mount-point change (`mount`: the old and
+/// new mount point and the first existing entry). `Ok` = go on.
+fn ask_additions(utoc: &Path, steps: &[Step], plan: &crate::add::NewPlan, mode: ValidateOnAdd, existing: bool, mount: Option<(&str, &str, Option<&str>)>) -> Result<(), PackError> {
+    let new_files: Vec<String> = steps.iter().filter_map(|s| if let Op::New { full, .. } = &s.op { Some(crate::add::visible(full).to_string()) } else { None }).collect();
+    if new_files.is_empty() && mount.is_none() {
+        return Ok(());
+    }
+    let findings = match mode {
+        ValidateOnAdd::Off => String::new(),
+        ValidateOnAdd::Fix => crate::add::findings_text(&plan.findings.iter().filter(|f| !f.issue.fixable()).cloned().collect::<Vec<_>>(), true),
+        _ => crate::add::findings_text(&plan.findings, false),
+    };
+    let mount_text = mount.map(|(old, new, example)| {
+        let first_new = steps.iter().filter_map(Step::full).find(|f| strip_prefix_ignore_case(f, old).is_none());
+        crate::add::mount_text(&crate::add::MountChange { old, new, example_existing: example, example_new: first_new })
+    });
+    let text = crate::add::question(utoc, &new_files, existing, &findings, &plan.moved, mount_text.as_deref());
+    if crate::dialog::confirm(&text) {
+        Ok(())
+    } else {
+        Err(PackError::Aborted)
+    }
+}
+
 /// Total size of the container's files.
 fn container_bytes(utoc: &Path) -> u64 {
     let mut n = std::fs::metadata(utoc).map(|m| m.len()).unwrap_or(0);
@@ -801,9 +929,6 @@ fn container_bytes(utoc: &Path) -> u64 {
 pub fn pack_files(packed: &Path, sub_path: Option<&str>, src_path: &Path, items: &[String], flags: c_int, options: &Options) -> Result<Stats, PackError> {
     let opts = &options.pack;
     let utoc = utoc_of(packed);
-    if opts.mode == PackMode::ReplaceWithAddition {
-        dlog!("  PackMode=ReplaceWithAddition is not implemented yet: packing as ReplaceOnly");
-    }
     let inputs = inputs(src_path, sub_path, items, flags)?;
     let exists = utoc.is_file();
     let global = crate::global::find_global(&utoc, options.global_lookup_limit)
@@ -824,10 +949,13 @@ pub fn pack_files(packed: &Path, sub_path: Option<&str>, src_path: &Path, items:
     let input_bytes: u64 = inputs.iter().map(|i| i.len).sum();
     if exists {
         let (edit, header) = open_edit(&utoc)?;
-        let (steps, refusals) = plan(&inputs, &game, &utoc, Some(&edit), options.mount_point);
+        let (mut steps, refusals, cands) = plan(&inputs, &game, &utoc, Some(&edit), options.mount_point);
         if !refusals.is_empty() {
             return Err(PackError::User(refusals.message(&game.unreadable)));
         }
+        let new_plan = plan_new_files(&cands, &game, edit.toc().header.version, header.as_ref().map(|h| h.1.version), opts.validate_on_add);
+        check_new_files(&new_plan, opts.validate_on_add)?;
+        steps.extend(new_plan.steps.iter().cloned());
         if edit.is_signed() && !crate::dialog::confirm(&format!("{}\n\nThis container is signed. After the change it is written unsigned; a game that checks signatures may refuse it.\n\nContinue?", utoc.display())) {
             return Err(PackError::Aborted);
         }
@@ -837,9 +965,19 @@ pub fn pack_files(packed: &Path, sub_path: Option<&str>, src_path: &Path, items:
             validate_steps(&steps, &game, &utoc, header.as_ref().map(|h| &h.1), opts.validate_on_replace == ValidateOnReplace::Fix)
         };
         decide_validation(opts.validate_on_replace, &validation)?;
+        let new_mount = mount_change(&edit, &steps);
+        let first_entry = edit.chunks().find_map(|(_, _, p)| p.map(String::from));
+        let old_mount = edit.mount_point().unwrap_or("").to_string();
+        ask_additions(&utoc, &steps, &new_plan, opts.validate_on_add, true, new_mount.as_deref().map(|n| (old_mount.as_str(), n, first_entry.as_deref())))?;
         let methods = edit.toc().compression_methods.clone();
         let compressor = choose_compressor(opts, Some(&methods), &game)?;
-        dlog!("  {} steps ({} replace, {} add), compression {compressor:?}", steps.len(), steps.iter().filter(|s| matches!(s.op, Op::Replace { .. })).count(), steps.iter().filter(|s| matches!(s.op, Op::Add { .. })).count());
+        dlog!(
+            "  {} steps ({} replace, {} copy, {} new), compression {compressor:?}",
+            steps.len(),
+            steps.iter().filter(|s| matches!(s.op, Op::Replace { .. })).count(),
+            steps.iter().filter(|s| matches!(s.op, Op::Add { .. })).count(),
+            steps.iter().filter(|s| matches!(s.op, Op::New { .. })).count()
+        );
         check_space(utoc.parent().unwrap_or(Path::new(".")), input_bytes)?;
         let (replaced, added, removed) = apply(edit, &utoc, &steps, &[], compressor.as_ref(), header, &validation.fixes)?;
         if opts.validate_on_replace == ValidateOnReplace::Fix {
@@ -848,16 +986,21 @@ pub fn pack_files(packed: &Path, sub_path: Option<&str>, src_path: &Path, items:
         let compacted = maybe_compact(&utoc, opts)?;
         Ok(Stats { replaced, added, removed, input_bytes, compacted, new_container: false, pak_written: None })
     } else {
-        let (steps, refusals) = plan(&inputs, &game, &utoc, None, options.mount_point);
+        let (mut steps, refusals, cands) = plan(&inputs, &game, &utoc, None, options.mount_point);
         if !refusals.is_empty() {
             return Err(PackError::User(refusals.message(&game.unreadable)));
         }
+        let global_toc = game.containers.iter().find(|c| c.is_global).map(|c| c.version).unwrap_or(TocVersion(8));
+        let new_plan = plan_new_files(&cands, &game, global_toc, None, opts.validate_on_add);
+        check_new_files(&new_plan, opts.validate_on_add)?;
+        steps.extend(new_plan.steps.iter().cloned());
         let validation = if opts.validate_on_replace == ValidateOnReplace::Off {
             Validation::default()
         } else {
             validate_steps(&steps, &game, &utoc, None, opts.validate_on_replace == ValidateOnReplace::Fix)
         };
         decide_validation(opts.validate_on_replace, &validation)?;
+        ask_additions(&utoc, &steps, &new_plan, opts.validate_on_add, false, None)?;
         let settings = new_container_settings(&utoc, &game, &steps, opts)?;
         let compressor = choose_compressor(opts, None, &game)?;
         let header = new_container_header(&game, &settings)?;
@@ -970,18 +1113,15 @@ fn new_container_settings(utoc: &Path, game: &Game, steps: &[Step], opts: &PackO
     let mount_point = match &opts.new_mount_point {
         Some(m) => {
             let m = if m.ends_with('/') { m.clone() } else { format!("{m}/") };
-            for s in steps {
-                if let Op::Add { from: GameFile { full: Some(f), .. } } = &s.op {
-                    if strip_prefix_ignore_case(f, &m).is_some() {
-                        continue;
-                    }
+            for f in steps.iter().filter_map(Step::full) {
+                if strip_prefix_ignore_case(f, &m).is_none() {
                     return Err(PackError::User(format!("{f} is not under the mount point {m} ([Pack] NewMountPoint).")));
                 }
             }
             m
         }
         None => {
-            let fulls: Vec<&str> = steps.iter().filter_map(|s| if let Op::Add { from } = &s.op { from.full.as_deref() } else { None }).collect();
+            let fulls: Vec<&str> = steps.iter().filter_map(Step::full).collect();
             if fulls.is_empty() { "../../../".to_string() } else { iostore::common_root_path(fulls) }
         }
     };

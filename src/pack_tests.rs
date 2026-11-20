@@ -184,8 +184,16 @@ fn add_from_another_container_and_new_container() {
         std::fs::write(&out, c.read_chunk(f.toc_index).unwrap()).unwrap();
         drop(c);
 
-        // into B
+        // into B (a mount-point change asks first, as tcl-uepak: answered Yes)
+        crate::dialog::TEST_CONFIRM_TEXTS.lock().unwrap().clear();
+        crate::dialog::TEST_CONFIRMS.lock().unwrap().push(true);
         let st = pack::pack_files(&b.with_extension("ucas"), None, &src, std::slice::from_ref(&shown), pack::PK_PACK_SAVE_PATHS, &options(false)).unwrap_or_else(|e| panic!("{}: {e}", b.display()));
+        let asked = crate::dialog::TEST_CONFIRM_TEXTS.lock().unwrap().clone();
+        if asked.is_empty() {
+            crate::dialog::TEST_CONFIRMS.lock().unwrap().clear();
+        } else {
+            assert!(asked[0].contains("outside the container's mount point") && !asked[0].contains("New files ("), "{}", asked[0]);
+        }
         assert_eq!((st.replaced, st.added), (0, 1));
         let after = snapshot(b);
         assert_eq!(after.chunks.len(), sb.chunks.len() + 1);
@@ -246,10 +254,17 @@ fn refusals_leave_the_container_untouched() {
     let items = ["Legacy.uasset", "New.uasset", "DefaultGame.ini"].map(String::from);
     match pack::pack_files(&utoc.with_extension("ucas"), Some("Game\\Content"), &src, &items, pack::PK_PACK_SAVE_PATHS, &options(false)) {
         Err(PackError::User(msg)) => {
-            assert!(msg.contains("Not in the game") && msg.contains("companion .pak") && msg.contains("Legacy cooked"), "{msg}");
+            assert!(msg.contains("companion .pak") && msg.contains("Legacy cooked"), "{msg}");
         }
         other => panic!("expected a refusal, got {:?}", other.err()),
     }
+    // a new file that isn't a Zen package of this game: refused (N1b), nothing asked
+    crate::dialog::TEST_CONFIRM_TEXTS.lock().unwrap().clear();
+    match pack::pack_files(&utoc.with_extension("ucas"), Some("Game\\Content"), &src, &["New.uasset".to_string()], pack::PK_PACK_SAVE_PATHS, &options(false)) {
+        Err(PackError::User(msg)) => assert!(msg.contains("can't be added") && (msg.contains("not a Zen package") || msg.contains("UE 5.3+")), "{msg}"),
+        other => panic!("expected a refusal, got {:?}", other.err()),
+    }
+    assert!(crate::dialog::TEST_CONFIRM_TEXTS.lock().unwrap().is_empty());
     // $legacy and the container header
     std::fs::create_dir_all(src.join("$legacy")).unwrap();
     std::fs::write(src.join("$legacy").join("a.uasset"), b"x").unwrap();
@@ -450,4 +465,279 @@ fn validate_on_replace_modes() {
         eprintln!("validate modes: {} ({b} <- {a}, imports fixable: {fixable})", utoc.display());
     }
     assert!(fixable_seen, "no 5.3+ sample game with a fixable case");
+}
+
+/// A package of `utoc` (TC display path, game key, chunk id), preferring one with imports and,
+/// when `with_bulk`, one with a `.ubulk` next to it.
+fn pick_package(utoc: &Path, with_bulk: bool) -> Option<(String, String, [u8; 12], Option<String>)> {
+    let s = snapshot(utoc);
+    let mut c = Container::open(utoc, Arc::new(Vanilla)).unwrap();
+    let idx = c.directory_index().unwrap().clone();
+    let prefix = Mount::parse(&idx.mount_point).display_prefix();
+    let shown_of = |p: &str| if prefix.is_empty() { p.replace('/', "\\") } else { format!("{prefix}\\{}", p.replace('/', "\\")) };
+    let mut best = None;
+    for f in &idx.files {
+        let key = pack::game_key(&idx.mount_point, &f.path);
+        let id = s.chunks.keys().find(|k| **k == s.files[&key]).copied().unwrap();
+        if !key.ends_with(".uasset") || iostore::ChunkId(id).kind(s.version) != ChunkKind::ExportBundleData {
+            continue;
+        }
+        let bulk_rel = f.path.replace(".uasset", ".ubulk");
+        let bulk = idx.files.iter().any(|g| g.path == bulk_rel).then(|| shown_of(&bulk_rel));
+        if with_bulk && bulk.is_none() {
+            continue;
+        }
+        let imports = s.header.as_ref().and_then(|h| h.get_store_entry(retoc::FPackageId(u64::from_le_bytes(id[..8].try_into().unwrap())))).map(|e| e.imported_packages.len()).unwrap_or(0);
+        let cand = (shown_of(&f.path), key, id, bulk);
+        if imports > 0 || with_bulk {
+            return Some(cand);
+        }
+        best.get_or_insert(cand);
+    }
+    let _ = c.read_chunk(0);
+    best
+}
+
+fn confirm_answers(a: &[bool]) {
+    crate::dialog::TEST_CONFIRM_TEXTS.lock().unwrap().clear();
+    let mut q = crate::dialog::TEST_CONFIRMS.lock().unwrap();
+    q.clear();
+    q.extend_from_slice(a);
+}
+
+fn asked() -> Vec<String> {
+    crate::dialog::TEST_CONFIRM_TEXTS.lock().unwrap().clone()
+}
+
+fn entry_of(s: &Snapshot, id: [u8; 12]) -> Option<retoc::container_header::StoreEntry> {
+    s.header.as_ref()?.get_store_entry(retoc::FPackageId(u64::from_le_bytes(id[..8].try_into().unwrap())))
+}
+
+/// N1b: a package the game doesn't have (deleted from a copy of the game first) is added back
+/// with the chunk id of its internal name and a store entry rebuilt from its own imports; the
+/// question comes once; No writes nothing; before UE 5.3 it's refused.
+#[test]
+fn new_package_is_added_with_a_derived_entry() {
+    use crate::config::ValidateOnAdd as A;
+    let _l = lock();
+    if games().is_empty() {
+        return;
+    }
+    let mut seen_new = false;
+    let mut seen_old = false;
+    for (n, g) in games().iter().enumerate() {
+        let probe = copy_game(g, &format!("new{n}"));
+        let Some(utoc) = targets(&probe).into_iter().find(|t| pick_package(t, false).is_some()) else { continue };
+        let name = utoc.file_name().unwrap().to_owned();
+        let header_version = snapshot(&utoc).header.as_ref().unwrap().version;
+        let supported = crate::validate::names_imports(header_version);
+        for (round, answer) in [(0, false), (1, true)] {
+            let copy = copy_game(g, &format!("new{n}-{round}"));
+            let utoc = copy.join(&name);
+            let (shown, key, id, _) = pick_package(&utoc, false).unwrap();
+            let original = snapshot(&utoc);
+            let src = copy.join("src");
+            let items = extract_named(&utoc, &src);
+            assert!(items.contains(&shown));
+            // the game no longer has it
+            assert_eq!(pack::delete_files(&utoc.with_extension("ucas"), std::slice::from_ref(&shown), &options(false)).unwrap().removed, 1);
+            let before = snapshot(&utoc);
+            confirm_answers(&[answer]);
+            let r = pack::pack_files(&utoc.with_extension("ucas"), None, &src, std::slice::from_ref(&shown), pack::PK_PACK_SAVE_PATHS, &options(false));
+            let after = snapshot(&utoc);
+            if !supported {
+                let Err(PackError::User(msg)) = r else { panic!("{}: added before 5.3", utoc.display()) };
+                assert!(msg.contains("UE 5.3+"), "{msg}");
+                assert!(asked().is_empty());
+                assert_eq!(before.chunks, after.chunks);
+                seen_old = true;
+                break;
+            }
+            let q = asked();
+            assert_eq!(q.len(), 1, "{q:?}");
+            assert!(q[0].contains("Adding new files to an existing container may lead to unpredictable results.") && q[0].contains(&shown.replace('\\', "/")), "{}", q[0]);
+            if !answer {
+                assert!(matches!(r, Err(PackError::Aborted)));
+                assert_eq!(before.chunks, after.chunks);
+                assert_eq!(before.header, after.header);
+                continue;
+            }
+            let st = r.unwrap_or_else(|e| panic!("{}: {e}", utoc.display()));
+            assert_eq!((st.replaced, st.added), (0, 1));
+            // same chunk id, data, path as the cook made them
+            assert_eq!(after.files.get(&key), Some(&id), "chunk id from the internal name");
+            assert_eq!(after.chunks[&id], original.chunks[&id]);
+            assert_eq!(after.files, original.files);
+            // the entry rebuilt from the package's own imports is the cook's
+            let (orig, now) = (entry_of(&original, id).unwrap(), entry_of(&after, id).unwrap());
+            assert_eq!(now.imported_packages, orig.imported_packages, "{}", utoc.display());
+            assert!(now.shader_map_hashes.is_empty());
+            seen_new = true;
+        }
+        eprintln!("new package: {} (5.3+: {supported})", utoc.display());
+        let _ = A::Warn;
+    }
+    assert!(seen_new, "no 5.3+ sample game");
+    assert!(seen_old, "no pre-5.3 sample game");
+}
+
+/// N1b: ValidateOnAdd on a new package dropped in the wrong folder (same content root), every mode.
+#[test]
+fn validate_on_add_modes() {
+    use crate::config::ValidateOnAdd as A;
+    let _l = lock();
+    let Some((g, name)) = games().into_iter().find_map(|g| {
+        let t = targets(&g).into_iter().find(|t| pick_package(t, false).is_some() && snapshot(t).header.as_ref().is_some_and(|h| crate::validate::names_imports(h.version)))?;
+        Some((g, t.file_name().unwrap().to_owned()))
+    }) else {
+        return eprintln!("no 5.3+ sample game: skipped");
+    };
+    for mode in [A::Warn, A::Fix, A::Error, A::Off] {
+        let copy = copy_game(&g, &format!("vadd-{mode:?}"));
+        let utoc = copy.join(&name);
+        let (shown, key, id, _) = pick_package(&utoc, false).unwrap();
+        let src = copy.join("src");
+        extract_named(&utoc, &src);
+        pack::delete_files(&utoc.with_extension("ucas"), std::slice::from_ref(&shown), &options(false)).unwrap();
+        // the same file one folder deeper: its path no longer gives its name
+        let (dir, file) = shown.rsplit_once('\\').unwrap();
+        let wrong = format!("{dir}\\WrongFolder\\{file}");
+        let wrong_path = src.join(wrong.replace('\\', "/"));
+        std::fs::create_dir_all(wrong_path.parent().unwrap()).unwrap();
+        std::fs::copy(src.join(shown.replace('\\', "/")), &wrong_path).unwrap();
+        let mut o = options(false);
+        o.pack.validate_on_add = mode;
+        confirm_answers(&[true]);
+        let r = pack::pack_files(&utoc.with_extension("ucas"), None, &src, std::slice::from_ref(&wrong), pack::PK_PACK_SAVE_PATHS, &o);
+        let after = snapshot(&utoc);
+        let q = asked();
+        let at = |k: &str| after.files.iter().find(|(p, _)| p.as_str() == k).map(|x| *x.1);
+        let wrong_key = key.replacen(&file.to_lowercase(), &format!("wrongfolder/{}", file.to_lowercase()), 1);
+        match mode {
+            A::Error => {
+                let Err(PackError::User(msg)) = r else { panic!("Error mode packed") };
+                assert!(msg.contains("ValidateOnAdd=Error") && msg.contains("belongs at"), "{msg}");
+                assert!(q.is_empty() && at(&key).is_none() && at(&wrong_key).is_none());
+            }
+            A::Warn => {
+                r.unwrap();
+                assert!(q[0].contains("[fixable]") && q[0].contains("belongs at"), "{}", q[0]);
+                assert_eq!(at(&wrong_key), Some(id), "Warn packs where dropped");
+            }
+            A::Fix => {
+                r.unwrap();
+                assert!(q[0].contains("Moved to the path their name gives") && !q[0].contains("[fixable]"), "{}", q[0]);
+                assert_eq!(at(&key), Some(id), "Fix moves it back");
+                assert!(at(&wrong_key).is_none());
+            }
+            A::Off => {
+                r.unwrap();
+                assert!(!q[0].contains("belongs at") && !q[0].contains("ValidateOnAdd"), "{}", q[0]);
+                assert_eq!(at(&wrong_key), Some(id));
+            }
+        }
+    }
+}
+
+/// N1b: a new package from another container (outside this one's mount point) asks once with
+/// the uepak-style mount-point block; a new container takes new files too (with the question).
+#[test]
+fn new_files_mount_point_and_new_container() {
+    let _l = lock();
+    let Some(g) = games().into_iter().find(|g| {
+        let t = targets(g);
+        t.len() >= 2 && snapshot(&t[0]).header.as_ref().is_some_and(|h| crate::validate::names_imports(h.version))
+    }) else {
+        return eprintln!("no 5.3+ game with two containers: skipped");
+    };
+    let copy = copy_game(&g, "newmount");
+    let t = targets(&copy);
+    // a container whose mount point the other's package doesn't fit
+    let pair = t.iter().flat_map(|a| t.iter().map(move |b| (a.clone(), b.clone()))).find(|(a, b)| {
+        if a == b {
+            return false;
+        }
+        let (Ok(mut ca), Ok(mut cb)) = (Container::open(a, Arc::new(Vanilla)), Container::open(b, Arc::new(Vanilla))) else { return false };
+        let (ma, mb) = (ca.directory_index().unwrap().mount_point.clone(), cb.directory_index().unwrap().mount_point.clone());
+        pick_package(a, false).is_some() && !ma.to_lowercase().starts_with(&mb.to_lowercase())
+    });
+    let Some((a, b)) = pair else { return eprintln!("no container pair with different mount points: skipped") };
+    let (shown, key, id, _) = pick_package(&a, false).unwrap();
+    let src = copy.join("src");
+    extract_named(&a, &src);
+    pack::delete_files(&a.with_extension("ucas"), std::slice::from_ref(&shown), &options(false)).unwrap();
+    let before_b = snapshot(&b);
+    confirm_answers(&[true]);
+    let st = pack::pack_files(&b.with_extension("ucas"), None, &src, std::slice::from_ref(&shown), pack::PK_PACK_SAVE_PATHS, &options(false)).unwrap();
+    assert_eq!(st.added, 1);
+    let q = asked();
+    assert_eq!(q.len(), 1);
+    assert!(q[0].contains("New files (1)") && q[0].contains("outside the container's mount point") && q[0].contains("Where the game finds them doesn't change"), "{}", q[0]);
+    let after_b = snapshot(&b);
+    assert_eq!(after_b.files.get(&key), Some(&id));
+    for (k, v) in &before_b.files {
+        assert_eq!(after_b.files.get(k), Some(v), "existing files keep their game paths: {k}");
+    }
+    // a new container with a new file: asked too
+    pack::delete_files(&b.with_extension("ucas"), std::slice::from_ref(&shown), &options(false)).unwrap();
+    let newc = copy.join("zzz_new_P.utoc");
+    confirm_answers(&[true]);
+    let st = pack::pack_files(&newc.with_extension("ucas"), None, &src, std::slice::from_ref(&shown), pack::PK_PACK_SAVE_PATHS, &options(false)).unwrap();
+    assert!(st.new_container && st.added == 1);
+    let q = asked();
+    assert!(q.len() == 1 && q[0].contains("This new container gets files the game doesn't have"), "{q:?}");
+    let sn = snapshot(&newc);
+    assert_eq!(sn.files.get(&key), Some(&id));
+    assert!(entry_of(&sn, id).is_some());
+}
+
+/// N1b: bulk data travels with its package (id = package id + bulk kind, index 0); alone
+/// (package not in the game) it's refused. No 5.3+ sample has bulk files, so the `.ubulk` is
+/// made up next to a real package: this checks ids, paths and refusals, not bulk content.
+#[test]
+fn bulk_files_follow_their_package() {
+    let _l = lock();
+    let Some((g, name)) = games().into_iter().find_map(|g| {
+        let t = targets(&g).into_iter().find(|t| pick_package(t, false).is_some() && snapshot(t).header.as_ref().is_some_and(|h| crate::validate::names_imports(h.version)))?;
+        Some((g, t.file_name().unwrap().to_owned()))
+    }) else {
+        return eprintln!("no 5.3+ sample game: skipped");
+    };
+    let copy = copy_game(&g, "bulk");
+    let utoc = copy.join(&name);
+    let (shown, key, id, _) = pick_package(&utoc, false).unwrap();
+    let src = copy.join("src");
+    extract_named(&utoc, &src);
+    pack::delete_files(&utoc.with_extension("ucas"), std::slice::from_ref(&shown), &options(false)).unwrap();
+    let bulk = shown.replace(".uasset", ".ubulk");
+    let mmap = shown.replace(".uasset", ".m.ubulk");
+    std::fs::write(src.join(bulk.replace('\\', "/")), vec![0x5Au8; 3000]).unwrap();
+    std::fs::write(src.join(mmap.replace('\\', "/")), vec![0xA5u8; 1000]).unwrap();
+    let version = snapshot(&utoc).version;
+    // alone: refused, nothing asked
+    confirm_answers(&[true]);
+    match pack::pack_files(&utoc.with_extension("ucas"), None, &src, std::slice::from_ref(&bulk), pack::PK_PACK_SAVE_PATHS, &options(false)) {
+        Err(PackError::User(msg)) => assert!(msg.contains("bulk data without its package"), "{msg}"),
+        other => panic!("expected a refusal, got {:?}", other.err()),
+    }
+    assert!(asked().is_empty());
+    // with its package: one question, three files, ids derived from the package's
+    confirm_answers(&[true]);
+    let all = [shown.clone(), bulk.clone(), mmap.clone()];
+    let st = pack::pack_files(&utoc.with_extension("ucas"), None, &src, &all, pack::PK_PACK_SAVE_PATHS, &options(false)).unwrap();
+    assert_eq!(st.added, 3);
+    assert_eq!(asked().len(), 1);
+    let after = snapshot(&utoc);
+    let pkg = u64::from_le_bytes(id[..8].try_into().unwrap());
+    assert_eq!(after.files.get(&key), Some(&id));
+    let want = |kind| iostore::ChunkId::create(pkg, 0, kind, version).unwrap().0;
+    assert_eq!(after.files.get(&key.replace(".uasset", ".ubulk")), Some(&want(ChunkKind::BulkData)));
+    assert_eq!(after.files.get(&key.replace(".uasset", ".m.ubulk")), Some(&want(ChunkKind::MemoryMappedBulkData)));
+    assert_eq!(after.chunks[&want(ChunkKind::BulkData)], vec![0x5Au8; 3000]);
+    // the memory-mapped one is flagged so (16 KiB aligned by the writer)
+    let c = Container::open(&utoc, Arc::new(Vanilla)).unwrap();
+    let mm = c.chunks().find(|i| i.id.0 == want(ChunkKind::MemoryMappedBulkData)).unwrap();
+    assert!(mm.memory_mapped());
+    // only the package has a store entry
+    assert!(entry_of(&after, id).is_some());
 }
