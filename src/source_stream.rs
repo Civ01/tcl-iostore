@@ -287,9 +287,8 @@ mod tests {
         std::fs::write(&f, b"main content").unwrap();
         let m = std::fs::metadata(&f).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
-        if !imp::supports_streams(&f) {
-            return eprintln!("temp volume has no named streams: skipped");
-        }
+        // NTFS temp folder expected (GitHub's Windows runners): fail instead of skipping silently
+        assert!(imp::supports_streams(&f), "the temp volume reports no named streams: {}", f.display());
         let info = SourceInfo { chunk: "00".repeat(12), entry: "Game\\a.uasset".into(), ..Default::default() };
         write(SourceStream::All, &f, &info);
         assert_eq!(std::fs::read_to_string(stream_path(&f)).unwrap(), info.render());
