@@ -457,3 +457,108 @@ fn legacy_version_prompt() {
     assert_eq!(run(&five_six, 1), [0]);
     assert_eq!(prompts().len(), 5, "a fitting ini value never asks");
 }
+
+/// N7: extraction fills the source stream's fields (raw and `$legacy`), View writes only under
+/// TC's `%TEMP%\_tc*`, Off never; the extracted bytes are the same with and without it.
+#[test]
+fn source_stream_fields_and_scope() {
+    use crate::config::SourceStream;
+    use crate::source_stream::TEST_WRITES;
+    let _l = lock();
+    let Some(root) = samples() else { return };
+    let mut list = vec![];
+    utocs(&root, &mut list);
+    // a 5.8 container with packages (the SML sample)
+    let Some(utoc) = list.iter().find(|u| u.to_string_lossy().contains("5.8") && u.file_name().is_some_and(|n| n.to_string_lossy().starts_with("pakchunk11")) && kept(u).is_none()).cloned() else {
+        return eprintln!("no 5.8 pakchunk11 sample: skipped");
+    };
+    let global = crate::global::find_global(&utoc, 5).unwrap().utoc;
+    let out = tmp("n7");
+    let view_dir = std::env::temp_dir().join(format!("_tc_uetoc_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&view_dir);
+    let mut checked_raw = false;
+    let mut checked_legacy = false;
+    for mode in [SourceStream::All, SourceStream::View, SourceStream::Off] {
+        legacy::reset();
+        dialog::TEST_VERSION_ANSWERS.lock().unwrap().clear();
+        TEST_WRITES.lock().unwrap().clear();
+        let opts = Options { source_stream: mode, ..Options::default() };
+        let mut arc = read::open_archive(&utoc.with_extension("ucas"), &opts, false).unwrap();
+        let mut wanted_raw = None;
+        let mut wanted_legacy = None;
+        while let Some(h) = read::next_header(&mut arc) {
+            let is_pkg = h.name.to_lowercase().ends_with("bp_sml.uasset");
+            if !is_pkg || h.attr & FILE_ATTR_DIRECTORY != 0 {
+                assert_eq!(read::process(&mut arc, PK_SKIP, None), 0);
+                continue;
+            }
+            let legacy_entry = h.name.starts_with("$legacy\\");
+            // View: one copy under the fake TC folder, one outside
+            let dest = if mode == SourceStream::View && legacy_entry { view_dir.join("BP_SML.uasset") } else { out.join(format!("{mode:?}")).join(h.name.replace('\\', "/")) };
+            dialog::TEST_VERSION_ANSWERS.lock().unwrap().push((99, false, true));
+            assert_eq!(read::process(&mut arc, PK_EXTRACT, Some(dest.clone())), 0, "{}", h.name);
+            if legacy_entry {
+                wanted_legacy = Some((h.name.clone(), dest));
+            } else {
+                wanted_raw = Some((h.name.clone(), dest));
+            }
+        }
+        let writes = TEST_WRITES.lock().unwrap().clone();
+        match mode {
+            SourceStream::Off => assert!(writes.is_empty(), "{writes:?}"),
+            SourceStream::View => {
+                // only the copy under %TEMP%\_tc*\
+                assert_eq!(writes.len(), 1, "{writes:?}");
+                assert_eq!(writes[0].0, wanted_legacy.as_ref().unwrap().1);
+            }
+            SourceStream::All => {
+                let (raw_name, raw_dest) = wanted_raw.unwrap();
+                let (leg_name, leg_dest) = wanted_legacy.unwrap();
+                let raw = &writes.iter().find(|w| w.0 == raw_dest).expect("raw stream").1;
+                let leg = &writes.iter().find(|w| w.0 == leg_dest).expect("legacy stream").1;
+                assert!(!raw.legacy && leg.legacy);
+                assert_eq!(raw.entry, raw_name);
+                assert_eq!(leg.entry, leg_name);
+                assert_eq!(raw.container, utoc);
+                assert_eq!(raw.paks, global.parent().unwrap());
+                assert_eq!(raw.chunk, leg.chunk, "legacy names its source package's chunk");
+                assert_eq!(raw.chunk.len(), 24);
+                assert_eq!(raw.toc_hash.as_ref().map(String::len), Some(40));
+                assert_eq!(raw.engine, None);
+                assert!(raw.engine_range.as_deref().is_some_and(|r| r.ends_with("UE5_8")), "{:?}", raw.engine_range);
+                assert_eq!(leg.engine_range.as_deref().map(|r| r.ends_with("UE5_8")), Some(true));
+                // the stream's text is what the proposal shows
+                let t = raw.render();
+                assert!(t.starts_with("uetoc-source 1\nform=raw\ncontainer="), "{t}");
+                checked_raw = true;
+                checked_legacy = true;
+            }
+        }
+    }
+    // extracted bytes don't depend on the mode
+    let mut compared = 0;
+    for f in walk_files(&out.join("All")) {
+        let rel = f.strip_prefix(out.join("All")).unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), std::fs::read(out.join("Off").join(rel)).unwrap(), "{}", rel.display());
+        compared += 1;
+    }
+    assert_eq!(compared, 2);
+    assert!(checked_raw && checked_legacy);
+    let _ = std::fs::remove_dir_all(&view_dir);
+}
+
+fn walk_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    out
+}

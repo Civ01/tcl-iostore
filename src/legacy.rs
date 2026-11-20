@@ -468,6 +468,8 @@ pub struct Session {
     known_5_8: Option<bool>,
     package: Option<(u32, HashMap<Part, Vec<u8>>)>,
     shader: Option<(u32, Vec<u8>, Vec<u8>)>,
+    /// Engine version the last package conversion used (`None`: the package's own versions).
+    used: Option<(u32, Option<EngineVersion>)>,
 }
 
 impl Session {
@@ -484,6 +486,7 @@ impl Session {
             known_5_8: None,
             package: None,
             shader: None,
+            used: None,
         })
     }
 
@@ -549,6 +552,7 @@ impl Session {
             self.package = None;
             let info = c.chunk(chunk).map_err(|e| LegacyError::Failed(e.to_string()))?;
             let (version, layout_5_8) = self.version_for(c, chunk, ini)?;
+            self.used = Some((chunk, version));
             let id = FPackageId(info.id.id64());
             let out = Collect(Mutex::new(Vec::new()));
             let started = std::time::Instant::now();
@@ -568,6 +572,18 @@ impl Session {
         }
         let files = &self.package.as_ref().unwrap().1;
         files.get(&part).map(Vec::as_slice).ok_or_else(|| LegacyError::Failed(format!("the conversion produced no {part:?} file")))
+    }
+
+    /// Engine version used for the package at `chunk`, if it was converted last and a fixed
+    /// version was used (ini, prompt or heuristic); `None` for a versioned package converted
+    /// with its own versions.
+    pub fn version_used(&self, chunk: u32) -> Option<EngineVersion> {
+        self.used.filter(|(c, _)| *c == chunk).and_then(|(_, v)| v)
+    }
+
+    /// The engine versions the `$legacy` prompt would offer for this game.
+    pub fn engine_candidates(&self) -> Vec<EngineVersion> {
+        refine(candidates(self.store.toc, self.store.header), self.store.shader_hash_size)
     }
 
     pub fn shader_part(&mut self, c: &Container, chunk: u32, asset_info: bool) -> Result<&[u8], LegacyError> {

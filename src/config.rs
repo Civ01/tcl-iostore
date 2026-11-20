@@ -49,6 +49,17 @@ pub enum PackCompression {
     Oodle,
 }
 
+/// `[Options] SourceStream` (N7, `proposals/N7-source-stream.md`): which extracted packages get a
+/// `<file>:uetoc.source` stream naming their container, for tcl-uassetvw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceStream {
+    /// Only TC's view extractions (F3, Quick View, Enter: `%TEMP%\_tc*\…`).
+    View,
+    /// Every package extraction.
+    All,
+    Off,
+}
+
 /// `[Pack] ValidateOnReplace`: what to do when a packed file takes the place of a game package
 /// and differs from it in ways that can break loading (SPEC §6b.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +143,8 @@ pub struct Options {
     /// `LegacyGuessScriptTypes`: name engine structs/enums in `$legacy` imports by a name guess
     /// instead of `Object` (a wrong guess makes the legacy loader fail that import).
     pub legacy_guess_script_types: bool,
+    /// `SourceStream` (N7): where extracted packages get a `:uetoc.source` stream.
+    pub source_stream: SourceStream,
     /// `[Pack]` section.
     pub pack: PackOptions,
     /// Problems found while parsing (logged; invalid values keep defaults).
@@ -149,6 +162,7 @@ impl Default for Options {
             debug_log: false,
             legacy_engine_version: None,
             legacy_guess_script_types: false,
+            source_stream: SourceStream::View,
             pack: PackOptions::default(),
             warnings: vec![],
         }
@@ -388,6 +402,12 @@ pub fn parse_options(text: &str) -> Options {
             "virtualfolderattr" => opts.virtual_folder_attr = parse_attr_list(raw),
             "debuglog" => opts.debug_log = parse_bool(raw).unwrap_or(false),
             "legacyguessscripttypes" => opts.legacy_guess_script_types = parse_bool(raw).unwrap_or(false),
+            "sourcestream" => match raw.to_ascii_lowercase().as_str() {
+                "view" => opts.source_stream = SourceStream::View,
+                "all" => opts.source_stream = SourceStream::All,
+                "off" | "0" | "no" => opts.source_stream = SourceStream::Off,
+                _ => bad(&key),
+            },
             "legacyengineversion" => match crate::legacy::parse_version(raw) {
                 Ok(v) => opts.legacy_engine_version = v,
                 Err(()) => bad(&key),

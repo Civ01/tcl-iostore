@@ -68,6 +68,10 @@ pub struct Archive {
     /// `LegacyEngineVersion` when the archive was opened (`None` = Auto).
     pub legacy_version: Option<retoc::version::EngineVersion>,
     pub legacy_guess_script_types: bool,
+    /// `SourceStream` when the archive was opened.
+    pub source_stream: crate::config::SourceStream,
+    /// N7 `engine_range` for raw packages (worked out on first use).
+    pub source_engine_range: Option<Option<String>>,
 }
 
 /// Rejects entry names that would escape the destination folder.
@@ -97,6 +101,8 @@ impl Archive {
             legacy_declined: false,
             legacy_version: options.legacy_engine_version,
             legacy_guess_script_types: options.legacy_guess_script_types,
+            source_stream: options.source_stream,
+            source_engine_range: None,
         }
     }
 

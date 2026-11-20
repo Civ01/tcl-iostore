@@ -19,6 +19,12 @@ decisions: [SPEC.md](SPEC.md).
   (`LegacyEngineVersion` in `uetoc.ini`).
   Imports of engine structs and enums are written with class `Object` (always
   loadable); `LegacyGuessScriptTypes=1` names them by a guess instead (nicer in viewers).
+- **Source stream for tcl-uassetvw** (`SourceStream`, default `View`): a package TC extracts
+  for viewing (F3, Quick View, Enter) gets a small NTFS stream `:uetoc.source` naming its
+  container, the global's folder and the chunk (and for `$legacy` the engine version used), so
+  the Lister plugin finds the game without asking. The file's content, size and dates don't
+  change; nothing is written on volumes without named streams. `All` = every extracted
+  package, `Off` = never.
 - **`.utoc`**: shows one text file, `<ContainerId>.txt`, describing the header, container
   header, signatures and every chunk (fixed-width tables for Lister's monospace font). Set
   `OpenUtocAsVirtualFile=0` to open `.utoc` files like the `.ucas`.

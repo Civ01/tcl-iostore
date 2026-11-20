@@ -544,6 +544,11 @@ pub fn process(arc: &mut Archive, op: c_int, dest: Option<PathBuf>) -> c_int {
             };
             if code == 0 {
                 dlog!("  ok in {} ms", started.elapsed().as_millis());
+                if op == PK_EXTRACT {
+                    if let Some(d) = &dest {
+                        source_stream_raw(arc, index, &item.display, d);
+                    }
+                }
             } else {
                 dlog!("  -> {}", crate::code_name(code));
                 if code != E_EABORTED {
@@ -553,6 +558,41 @@ pub fn process(arc: &mut Archive, op: c_int, dest: Option<PathBuf>) -> c_int {
             code
         }
     }
+}
+
+/// N7: `:uetoc.source` on an extracted raw package (when the scope and volume allow).
+fn source_stream_raw(arc: &mut Archive, index: u32, display: &str, dest: &Path) {
+    use crate::source_stream as ss;
+    if !ss::wanted(arc.source_stream, dest, &std::env::temp_dir()) {
+        return;
+    }
+    let Ok(info) = arc.container.chunk(index) else { return };
+    if info.kind != iostore::ChunkKind::ExportBundleData {
+        return;
+    }
+    if arc.source_engine_range.is_none() {
+        let toc = retoc::EIoStoreTocVersion::from_repr(arc.container.version().0);
+        let header = arc
+            .container
+            .chunks()
+            .find(|c| c.kind == iostore::ChunkKind::ContainerHeader)
+            .and_then(|c| arc.container.read_chunk(c.index).ok())
+            .and_then(|d| retoc::container_header::FIoContainerHeader::deserialize(&mut std::io::Cursor::new(d), None).ok())
+            .map(|h| h.version);
+        let names: Vec<&str> = toc.map(|t| crate::legacy::candidates(t, header)).unwrap_or_default().into_iter().map(crate::legacy::version_ini_name).collect();
+        arc.source_engine_range = Some(ss::range_text(&names));
+    }
+    let src = ss::SourceInfo {
+        legacy: false,
+        container: arc.container.utoc_path().to_path_buf(),
+        paks: arc.global.as_deref().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default(),
+        entry: display.to_string(),
+        chunk: info.id.hex(),
+        toc_hash: Some(hex(&info.meta.hash)),
+        engine: None,
+        engine_range: arc.source_engine_range.clone().flatten(),
+    };
+    ss::write(arc.source_stream, dest, &src);
 }
 
 /// Writes a file produced in memory (`dest` None = test).
@@ -632,7 +672,28 @@ fn process_legacy(arc: &mut Archive, op: c_int, dest: Option<PathBuf>, display: 
         },
     };
     let code = match bytes {
-        Ok(b) => write_bytes(if op == PK_TEST { None } else { dest.as_deref() }, display, b),
+        Ok(b) => {
+            let code = write_bytes(if op == PK_TEST { None } else { dest.as_deref() }, display, b);
+            if let (0, PK_EXTRACT, Some(d), LegacyKind::Package { chunk, part: crate::legacy::Part::Asset, .. }) = (code, op, dest.as_deref(), &kind) {
+                if crate::source_stream::wanted(arc.source_stream, d, &std::env::temp_dir()) {
+                    if let Ok(info) = container.chunk(*chunk) {
+                        let names: Vec<&str> = session.engine_candidates().into_iter().map(crate::legacy::version_ini_name).collect();
+                        let src = crate::source_stream::SourceInfo {
+                            legacy: true,
+                            container: container.utoc_path().to_path_buf(),
+                            paks: arc.global.as_deref().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default(),
+                            entry: display.to_string(),
+                            chunk: info.id.hex(),
+                            toc_hash: Some(hex(&info.meta.hash)),
+                            engine: session.version_used(*chunk).map(|v| crate::legacy::version_ini_name(v).to_string()),
+                            engine_range: crate::source_stream::range_text(&names),
+                        };
+                        crate::source_stream::write(arc.source_stream, d, &src);
+                    }
+                }
+            }
+            code
+        }
         Err(LegacyError::Cancelled) => {
             arc.legacy_declined = true;
             E_EABORTED

@@ -1,4 +1,4 @@
-# N7: source stream on extracted packages (for tcl-uassetvw) **[proposed 2026-11-20, revised by tcl-iostore 2026-11-20]**
+# N7: source stream on extracted packages (for tcl-uassetvw) **[implemented 2026-11-20]**
 
 Proposal from the tcl-uassetvw project (Lister plugin for `.uasset/.umap` metadata,
 <https://github.com/Civ01/tcl-uassetvw>), to be revised here before anything is implemented.
@@ -224,4 +224,23 @@ stays the proposed default.
 - Some security products log alternate-data-stream writes; the stream holds only paths and ids.
 - Side note from the PR description (Ubuntu's Wine 9.0 needs `/run/user/<uid>`): taken over into
   `SPEC.md` §12a when N7 lands; the sandbox here runs WineHQ 11.
+
+## 9. As built (tcl-iostore, 2026-11-20)
+- `src/source_stream.rs` (scope, volume check cached per volume, write + time restore, content),
+  called from `read.rs` after a successful raw package extraction (`ExportBundleData` chunk)
+  and after a `$legacy` `.uasset`/`.umap`. `[Options] SourceStream=View|All|Off`, default `View`.
+- `View` = the destination is anywhere under `<temp>\_tc*\` (`std::env::temp_dir()`, i.e.
+  `GetTempPath2W`/`GetTempPathW`; `\\?\` prefix and case ignored).
+- `engine` (legacy) is written when the conversion used a fixed engine version (ini, prompt or
+  the container's versions); a versioned package converted with its own versions has none —
+  its header carries the versions itself. `engine_range`: legacy = the `$legacy` prompt's list
+  (`Session::engine_candidates`); raw = `legacy::candidates` for the container's TOC and
+  container-header versions (computed once per opened container, only when a stream is wanted).
+- Main file times: read before the stream is written, set back after (`File::set_times` with
+  created/modified/accessed).
+- Tests: scope and content unit tests; `source_stream_fields_and_scope` (samples: raw + legacy
+  fields, View only under `_tc*`, Off never, extracted bytes identical with and without);
+  Windows CI: real stream round trip with unchanged bytes and times. TC under Wine: F3 → scope
+  matched, no stream, no stray file.
+- Still open: §8.2 (drag & drop / paste out of an archive on real Windows).
 

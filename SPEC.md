@@ -31,7 +31,7 @@ real Windows is open (§13).
 | N4 | **Custom game support** | Game profiles ported from CUE4Parse (keys, custom encryption, block layouts, magics); per-folder profile, offered on a read failure **[decided]** | medium per game | Hook in place (§2.2); needs the user's game-specific samples |
 | N5 | **TOC v9/v10** | `AddedSourceHashes`, `ContainerEncryptionMethod` (AES-CTR) | small | When a released engine writes them; CUE4Parse reads them |
 | N6 | **uepak follow-ups** | Port the per-folder key-prompt grace (Find Files) to tcl-uepak; recheck its dialogs in TC under Wine | small | |
-| N7 | **Source stream for tcl-uassetvw** | On extracting a package (default: only TC's view extractions, F3/Quick View), attach an NTFS stream `:uetoc.source` naming the container, the global's folder, the chunk and, for `$legacy`, the engine version used, so the Lister plugin resolves names without asking | small | **[proposed 2026-11-20, reviewed 2026-11-20]**, spec: [`proposals/N7-source-stream.md`](proposals/N7-source-stream.md) (review: §8); no side effects on extracted data or packing with the review's changes; copy-out of archives to be checked on Windows |
+| N7 | **Source stream for tcl-uassetvw** | On extracting a package (default: only TC's view extractions, F3/Quick View), attach an NTFS stream `:uetoc.source` naming the container, the global's folder, the chunk and, for `$legacy`, the engine version used, so the Lister plugin resolves names without asking | small | **Done 2026-11-20** (PR #1 merged, review §8 applied; spec: [`proposals/N7-source-stream.md`](proposals/N7-source-stream.md)); copy-out of archives to be checked on Windows |
 
 Order **[decided 2026-11-19]**: **N3** (part of reading) → **N1** (packing raw Zen files) → N2;
 N4/N5 when samples or a new engine appear; N6 when convenient. N1 starts with its own spec round.
@@ -549,6 +549,7 @@ MountFolderAttr=Hidden
 VirtualFolderAttr=Hidden    ; attribute of $chunks and $legacy
 LegacyEngineVersion=Auto    ; Auto | UE4_27 | UE5_0 … UE5_8 (§6a)
 LegacyGuessScriptTypes=0    ; 1 = ScriptStruct/Enum by name for top-level script imports (§6a.2)
+SourceStream=View           ; View | All | Off: :uetoc.source stream on extracted packages (N7)
 [Pack] (N1, §6b)
 PackMode=ReplaceOnly        ; ReplaceOnly | ReplaceWithAddition (later: N1b; acts as ReplaceOnly)
 Compression=Match           ; Match | None | Zlib | Gzip | LZ4 | Oodle
@@ -644,7 +645,8 @@ All in the new `iostore` crate (§2.1) **[done]**:
 
 ## 12a. Observed TC behaviour (TC 11.58.1 x64 under Wine 11, 2026-11-19)
 Checked in TC itself (portable TC under WineHQ 11.0 + Xvfb in the sandbox; Ubuntu's Wine 9.0
-crashes on start there):
+crashes on start there because `/run/user/<uid>` is missing: `mkdir -p /run/user/$(id -u) && chmod 700`
+on it fixes that, found in tcl-uassetvw):
 - Association: `.ucas` and `.utoc` entries in `[PackerPlugins]` with caps 212; both show
   archive icons. Listing: mount folders and `$chunks` hidden, sizes > 4 GB shown correctly,
   `cd` into paths inside a container works.
@@ -687,6 +689,11 @@ crashes on start there):
   `..\..\..\Moadra\Content\Mods` wrote `AutoCompactUnder=20M`,
   `NewMountPoint=../../../Moadra/Content/Mods/`, comments kept; reopening showed the saved values.
   A label was cut off under Wine's font at first (widened).
+
+- **N7 source stream (2026-11-20)**: F3 on `BP_SML.uasset` inside `pakchunk11`: extracted to
+  `Temp\_tc\BP_SML.uasset`, scope matched, log "volume c:\ named streams: false (flags 0x8a)", no
+  stream and no stray `BP_SML.uasset:uetoc.source` file (Wine would create one without the volume
+  check, proposal §8.1). Real streams are tested on Windows CI (NTFS).
 
 ## 13. Open items
 - Short check on real Windows (§12a was done under Wine): dialog layout/fonts, install from

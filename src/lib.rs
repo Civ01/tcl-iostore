@@ -21,6 +21,7 @@ pub mod log;
 pub mod pack;
 pub mod pack_settings;
 pub mod validate;
+pub mod source_stream;
 pub mod profile;
 mod progress;
 pub mod read;
