@@ -1,4 +1,4 @@
-//! Packing tests (SPEC §6b) on copies of whole sample game folders (`IOSTORE_SAMPLES`).
+//! Packing tests (SPEC §8) on copies of whole sample game folders (`IOSTORE_SAMPLES`).
 //! A game folder = a folder with `global.utoc` and at least one other container; encrypted and
 //! trimmed ones are left out, as are games over 64 MB.
 
@@ -371,7 +371,7 @@ fn validation_finds_nothing_in_an_unmodified_game() {
 }
 
 /// `ValidateOnReplace` on a package replaced by a different one (B's path, A's bytes): every
-/// mode does what SPEC §6b.1 says, in every sample game.
+/// mode does what SPEC §8.5 says, in every sample game.
 #[test]
 fn validate_on_replace_modes() {
     use crate::config::ValidateOnReplace as V;
@@ -758,7 +758,7 @@ fn mount_of(utoc: &Path) -> String {
     Container::open(utoc, Arc::new(Vanilla)).unwrap().directory_index().unwrap().mount_point.clone()
 }
 
-/// SPEC §6b.2 rule B, without a game.
+/// SPEC §8.3 rule B, without a game.
 #[test]
 fn new_container_paths_from_the_mount_point() {
     let m = Some("../../../Moadra/Content/Mods/SML/");
@@ -781,7 +781,7 @@ fn new_container_paths_from_the_mount_point() {
     assert_eq!(pack::new_container_full("Moadra/a.uasset", Some("../../../"), none), "../../../Moadra/a.uasset");
 }
 
-/// SPEC §6b.2: a game file dropped alone or with its whole path into a new container, with the
+/// SPEC §8.3: a game file dropped alone or with its whole path into a new container, with the
 /// mount point asked (preset = remembered, else the game's folder of the package), Auto, a wrong
 /// mount point (refused, named in the message), Cancel, AskMountPoint=0 and the history.
 #[test]

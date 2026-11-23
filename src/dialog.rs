@@ -49,7 +49,7 @@ pub fn confirm(text: &str) -> bool {
     crate::win::ask_yes_no(text)
 }
 
-/// Engine-version prompt for the legacy view (SPEC §6a).
+/// Engine-version prompt for the legacy view (SPEC §7).
 pub struct VersionPrompt<'a> {
     pub container: &'a Path,
     pub choices: &'a [&'a str],
@@ -88,7 +88,7 @@ pub fn prompt_version(p: &VersionPrompt) -> Option<VersionAnswer> {
     imp::prompt_version(p)
 }
 
-/// Mount-point question for a new container (SPEC §6b.2).
+/// Mount-point question for a new container (SPEC §8.3).
 pub struct MountPrompt<'a> {
     pub container: &'a Path,
     /// Dropdown entries (remembered ones first, then suggestions, then `Auto`).

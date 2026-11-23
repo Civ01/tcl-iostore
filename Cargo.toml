@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 [dependencies]
 sha1 = "0.10"
 iostore = { git = "https://github.com/Civ01/retoc", branch = "tcl-iostore" }
-# legacy view (SPEC §6a): retoc's to-legacy conversion
+# legacy view (SPEC §7): retoc's to-legacy conversion
 retoc = { git = "https://github.com/Civ01/retoc", branch = "tcl-iostore" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

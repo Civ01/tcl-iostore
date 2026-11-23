@@ -1,9 +1,9 @@
-//! Packing raw Zen files (N1, SPEC §6b).
+//! Packing raw Zen files (N1, SPEC §8).
 //!
 //! A packed file the game has is replaced in place in the target container (chunk ID, path and
 //! store entry stay) or, found only in another container under the global's folder, added with
 //! that container's chunk ID, path and (for packages) store entry. New packages and their bulk
-//! files (N1b, SPEC §6c) are planned in [`crate::add`]. Anything else cancels the whole copy.
+//! files (N1b, SPEC §8.4) are planned in [`crate::add`]. Anything else cancels the whole copy.
 //! New containers take their format from the game. The container edit itself is
 //! [`iostore::edit::ContainerEdit`]: new data is appended, the `.utoc` replaced last, an undo file
 //! kept while writing.
@@ -243,7 +243,7 @@ pub enum Op {
     Replace { index: usize },
     /// Chunk from elsewhere in the game, added with its id and path (relative to the game root).
     Add { from: GameFile },
-    /// A file the game doesn't have (N1b, SPEC §6c): its full game path, its store entry
+    /// A file the game doesn't have (N1b, SPEC §8.4): its full game path, its store entry
     /// (packages), memory-mapped (`.m.ubulk`).
     New { full: String, entry: Option<retoc::container_header::StoreEntry>, memory_mapped: bool },
 }
@@ -348,7 +348,7 @@ fn full_key(full: &str) -> String {
     crate::add::visible(full).to_lowercase()
 }
 
-/// Where a file copied into a new container at `rel` (`/`-separated) goes (SPEC §6b.2):
+/// Where a file copied into a new container at `rel` (`/`-separated) goes (SPEC §8.3):
 /// - mount point `None` (Auto): `../../../` + rel, the container's mount point follows the files;
 /// - otherwise mount point + rel, unless rel already starts with the mount point's folders
 ///   (`Moadra/Content/Mods/SML/…` for `../../../Moadra/Content/Mods/SML/`): then rel is the full
@@ -429,7 +429,7 @@ pub fn plan(inputs: &[Input], game: &Game, utoc: &Path, target: Option<&Containe
         } else if game.in_global(&key) {
             r.read_only.push(shown);
         } else if matches!(crate::add::ext_of(&key).as_str(), "uasset" | "umap" | "ubulk" | "uptnl" | "m.ubulk") {
-            // not in the game: a new file (N1b, SPEC §6c)
+            // not in the game: a new file (N1b, SPEC §8.4)
             let rel = shown.replace('\\', "/");
             let full = match (mode, target_mount, new_full) {
                 (_, _, Some(f)) => f,
@@ -700,7 +700,7 @@ fn apply(
 }
 
 // ---------------------------------------------------------------------------
-// ValidateOnReplace (SPEC §6b.1)
+// ValidateOnReplace (SPEC §8.5)
 
 /// Result of checking the packages among `steps`.
 #[derive(Default)]
@@ -872,7 +872,7 @@ fn report_fixes(v: &Validation) {
 }
 
 // ---------------------------------------------------------------------------
-// N1b: new files (SPEC §6c)
+// N1b: new files (SPEC §8.4)
 
 /// The container-header version of the game (any non-global container's header).
 fn game_header_version(game: &Game) -> Option<retoc::container_header::EIoContainerHeaderVersion> {

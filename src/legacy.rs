@@ -1,4 +1,4 @@
-//! Legacy view (`$legacy`, SPEC §6a): Zen packages converted to legacy cooked files with
+//! Legacy view (`$legacy`, SPEC §7): Zen packages converted to legacy cooked files with
 //! retoc's `to-legacy` code, reading through the `iostore` crate.
 
 use std::collections::HashMap;

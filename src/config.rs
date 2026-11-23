@@ -1,4 +1,4 @@
-//! Plugin locations and options (`uetoc.ini`, SPEC §9).
+//! Plugin locations and options (`uetoc.ini`, SPEC §12).
 //!
 //! The settings directory is the plugin's own directory when it is writable,
 //! otherwise the directory of TC's suggested ini (next to wincmd.ini), as in tcl-uepak.
@@ -26,7 +26,7 @@ pub const ATTR_SYSTEM: u32 = 0x4;
 
 pub const DEFAULT_GLOBAL_LOOKUP_LIMIT: u32 = 5;
 
-/// `[Pack] ValidateOnAdd` (SPEC §6c): checks for files the game doesn't have.
+/// `[Pack] ValidateOnAdd` (SPEC §8.4): checks for files the game doesn't have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ValidateOnAdd {
     /// List the findings in the additions question.
@@ -65,7 +65,7 @@ pub enum SourceStream {
 }
 
 /// `[Pack] ValidateOnReplace`: what to do when a packed file takes the place of a game package
-/// and differs from it in ways that can break loading (SPEC §6b.1).
+/// and differs from it in ways that can break loading (SPEC §8.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidateOnReplace {
     /// Ask before packing (list of findings, Yes/No).

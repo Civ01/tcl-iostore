@@ -1,804 +1,480 @@
 # tcl-iostore — Specification
 
-Total Commander 11+ packer plugin (`uetoc.wcx64`) for Unreal Engine IoStore containers
+Total Commander 11+ x64 packer plugin (`uetoc.wcx64`) for Unreal Engine IoStore containers
 (`.utoc` + `.ucas`). Sister of [tcl-uepak](https://github.com/Civ01/tcl-uepak) (`uepak.wcx64`,
-legacy `.pak`), whose skeleton, conventions and lessons it reuses.
+legacy `.pak`), whose skeleton, conventions and lessons it reuses; companion of
+[tcl-uassetvw](https://github.com/Civ01/tcl-uassetvw) (Lister plugin for `.uasset`).
 
-Spec version: v3 (2026-11-19): phase 1 (reading/extraction) done; N3 (legacy view, §6a) in work, then N1. Marks: **[decided]** = user decision,
-**[proposed]** = my default, change it if you disagree, **[open]** = needs input or samples.
+Spec version: v4 (2026-11-23). This document describes the plugin **as built**; history and
+superseded plans were removed (see git history before v4). Decisions are the user's unless marked
+*(default)* = chosen by me, open to change.
 
 ---
 
 ## 0. Status and roadmap
 
-Phase 1 is implemented and checked in TC 11.58 under Wine (2026-11-19, §12a); a short check on
-real Windows is open (§13).
+| # | Milestone | Status |
+|---|---|---|
+| R1–R4 | Reading: container reader (partitions, streaming, AES, Oodle, typed errors), listing, `$chunks`, `.utoc` info file, extract + test with hash checks, keys, game-profile hook | done 2026-11-19 |
+| N3 | Legacy view `$legacy`: Zen packages as legacy `.uasset/.uexp/…`, shader libraries, `scriptobjects.bin` (§7) | done 2026-11-19 |
+| N3b | UE 5.8 specifics: 8-byte shader hashes, cooked import `PackageName` (§7.2) | done 2026-11-19 |
+| N1 | Packing raw Zen files: replace/delete in containers, new patch containers, Configure dialog (§8) | done 2026-11-19/20 |
+| — | `ValidateOnReplace` (§8.5) | done 2026-11-20 |
+| N7 | `:uetoc.source` NTFS stream for tcl-uassetvw (§9) | done 2026-11-20 |
+| N1b | New files: packages (5.3+) and their bulk files, `ValidateOnAdd`, mount-point question (§8.4, §8.6) | done 2026-11-20 |
+| — | New-container mount-point dialog, paths that follow the mount point (§8.3) | done 2026-11-23 |
 
-### Phase 1: reading and extraction (done)
-| # | Milestone | Where | Status |
-|---|---|---|---|
-| R1 | Container reader: partitions, block-by-block streaming, AES, typed errors, no panics, Oodle from Civ01/repak | `iostore` crate in `Civ01/retoc` branch `tcl-iostore` | ✅ |
-| R2 | Plugin skeleton (from tcl-uepak), open `.ucas`/`.utoc`, global lookup, listing, `$chunks` folder, `.utoc` info file | plugin | ✅ |
-| R3 | Extract and test (hash checks), AES keys (`uetoc.keys.json`, key dialog), Oodle `deps\` | plugin | ✅ |
-| R4 | Game-profile hook (vanilla profile only; see §2.2) wired through every read path | both | ✅ |
-
-### Next goals (candidates, to be ordered with the user)
-| # | Goal | Scope | Size | Notes |
-|---|---|---|---|---|
-| N1 | **Packing, raw** | Raw Zen files into containers: replace/delete in existing containers, new patch containers from game files; writer in `iostore` | large | **Done 2026-11-19 (§6b)**, Configure dialog 2026-11-20. **N1b done 2026-11-20 (§6c)**: new files (5.3+), ValidateOnAdd, uepak-style mount-point question; `PackMode` removed |
-| N2 | **Packing, legacy input** | Legacy `.uasset/.uexp/.ubulk` converted to Zen on pack (retoc `to-zen`), auto-detected, else asked once per copy session **[decided]** | large | Needs the global's script objects (already mandatory) and an engine version for the target; Zen header-size field per version (§6a.2) |
-| N3 | **Legacy conversion on extract** | Hidden `$legacy` folder: Zen packages as legacy `.uasset/.uexp/.ubulk…`, rebuilt shader libraries, `scriptobjects.bin` (retoc `to-legacy`) | medium | Done, incl. N3b (UE 5.8 shader hashes, §6a.1) |
-| N4 | **Custom game support** | Game profiles ported from CUE4Parse (keys, custom encryption, block layouts, magics); per-folder profile, offered on a read failure **[decided]** | medium per game | Hook in place (§2.2); needs the user's game-specific samples |
-| N5 | **TOC v9/v10** | `AddedSourceHashes`, `ContainerEncryptionMethod` (AES-CTR) | small | When a released engine writes them; CUE4Parse reads them |
-| N6 | **uepak follow-ups** | Port the per-folder key-prompt grace (Find Files) to tcl-uepak; recheck its dialogs in TC under Wine | small | |
-| N7 | **Source stream for tcl-uassetvw** | On extraction, attach an NTFS stream `:uetoc.source` naming the container, the global's folder, the chunk and, for `$legacy`, the engine version used, so the Lister plugin resolves names without asking. `SourceStream=View` (default: packages TC extracts to view or drag out) / `All` (every file, every operation) / `Off` | small | **Done 2026-11-20** (PR #1 merged; spec [`proposals/N7-source-stream.md`](proposals/N7-source-stream.md) §9 as built); drag-out added after the Windows check |
-
-Order **[decided 2026-11-19]**: **N3** (part of reading) → **N1** (packing raw Zen files) → N2;
-N4/N5 when samples or a new engine appear; N6 when convenient. N1 starts with its own spec round.
+Remaining work: §15.
 
 ### Non-goals
-- Packing raw Zen files that aren't packages or bulk files and that the game doesn't have (shader
-  libraries etc.), new packages for pre-5.3 games, and anything that isn't a raw Zen file (N2).
-- UE 4.25/4.26 containers (TOC v1/v2): may happen to work, not tested or promised.
-- On-demand containers (`OnDemand` flag, `.uondemandtoc`): listed if possible, data read
-  refused with a clear message **[proposed]**.
-- Showing the companion `.pak` contents (use uepak for that) **[decided]**.
+- New packages for pre-5.3 games (their packages don't name their imports; §8.4).
+- New raw chunk files other than packages and bulk files (shader libraries, …) — possibly with N2.
+- UE 4.25/4.26 containers (TOC v1/v2): may work, not tested or promised.
+- Showing the companion `.pak` contents (tcl-uepak does that). No `.pak` writing except the empty
+  companion `.pak` (§8.3); repak is not linked into the plugin.
 
 ---
 
 ## 1. Formats (verified)
 
-Checked against UE 5.8.4 source (`Core/Internal/IO/IoStore.h`, `Core/Private/IO/IoStore.cpp`,
-`IoStoreUtilities/Private/IoStoreWriter.cpp`, `PakFile/Private/IPlatformFilePak.cpp`) and the
-project's test containers.
+Against UE 5.8.4 source (`Core/Internal/IO/IoStore.h`, `Core/Private/IO/IoStore.cpp`,
+`IoStoreUtilities/Private/IoStoreWriter.cpp`, `PakFile/Private/IPlatformFilePak.cpp`,
+`AsyncLoading2.cpp`, `PackageStoreOptimizer.cpp`) and the test containers.
 
-| TOC version | Name | Engine | Test samples |
+| TOC version | Name | Engine | Samples |
 |---|---|---|---|
-| 3 | PartitionSize | 4.27 | vanilla 4.27 (Oodle), encrypted 4.27 (Oodle; base64 key) |
-| 4 | PerfectHash | (early 5.0 previews) | none |
-| 5 | PerfectHashWithOverflow | 5.0–5.3 | VanySlash demo 5.0 (trimmed, 9157 chunks, Oodle); vanilla 5.1, 5.2, 5.3 (uncompressed) |
-| 6 | OnDemandMetaData | 5.4 | vanilla 5.4, 5.4 AngelScript fork, G1R (Oodle) |
-| 7 | RemovedOnDemandMetaData | (unreleased) | none |
-| 8 | ReplaceIoChunkHashWithIoHash | 5.5–5.8 | vanilla 5.5–5.8; 5.8 compressed with Zlib, Gzip, LZ4; TheIsle 5.6 (encrypted, signed, Oodle) |
-| 9, 10 | AddedSourceHashes, ContainerEncryptionMethod | after 5.8.4 | none; refused with "TOC version N is newer than this plugin supports" |
+| 3 | PartitionSize | 4.27 | vanilla 4.27 (Oodle), encrypted 4.27 |
+| 4 | PerfectHash | early 5.0 previews | none |
+| 5 | PerfectHashWithOverflow | 5.0–5.3 | VanySlash 5.0 (trimmed), vanilla 5.1–5.3 |
+| 6 | OnDemandMetaData | 5.4 | vanilla 5.4, AngelScript 5.4, G1R (Oodle) |
+| 7 | RemovedOnDemandMetaData | unreleased | none |
+| 8 | ReplaceIoChunkHashWithIoHash | 5.5–5.8 | vanilla 5.5–5.8, 5.8 Zlib/Gzip/LZ4, The Isle 5.6 (encrypted, signed), ARK, The Isle server |
+| 9, 10 | AddedSourceHashes, ContainerEncryptionMethod | after 5.8.4 | none; refused: "TOC version N is newer than this plugin supports" |
 
-- Header 0x90 bytes, magic `-==--==--==--==-`. A header-size or block-entry-size mismatch is an
-  error, not an assert.
-- Container header versions: −1 PreInitial … 5 SoftPackageReferencesOffset (5.6+).
-- **Chunk hashes** (`FIoStoreTocEntryMeta`), measured on the test containers: **SHA-1** of the
-  uncompressed chunk in 4.27; **BLAKE3 truncated to 20 bytes** in 5.0–5.8 (v5, v6, v8).
-- Blocks: each block's disk size is padded to 16 bytes with `buf[(i - size) % size]` (same rule
-  as pak); AES-256-ECB over the padded block when encrypted; the directory index is encrypted
-  with the same key. Blocks stored without compression are encrypted too (verified on the
-  encrypted 4.27 sample). An offset in the uncompressed address space / block size = block index; a
-  block offset / `PartitionSize` = partition index (`name.ucas`, `name_s1.ucas`, …).
+- Header 0x90 bytes, magic `-==--==--==--==-`; a header-size or entry-size mismatch is an error.
+- Container header versions −1 PreInitial … 5 SoftPackageReferencesOffset (5.6+). 5.6/5.7/5.8
+  share version 5; 5.3+ (≥ NoExportInfo) store entries hold imported packages + shader-map
+  hashes, older ones also export counts and load order.
+- Chunk hashes: SHA-1 of the uncompressed chunk in 4.27; BLAKE3 truncated to 20 bytes in 5.0–5.8.
+- Blocks: disk size padded to 16 with `buf[(i - size) % size]`, AES-256-ECB over the padded block
+  when encrypted (uncompressed blocks too); the directory index is encrypted with the same key.
+  Partitions `name.ucas`, `name_s1.ucas`, … (offset / `PartitionSize`).
+- 4.27 globals hold LoaderInitialLoadMeta + LoaderGlobalNames + LoaderGlobalNameHashes (types 7–9),
+  5.x globals `ScriptObjects`.
 - A container is mounted through the `.pak` of the same name; the optional segment is `.o.utoc`.
+- IoStore keeps no hash of the decrypted index (wrong keys are detected by strict index parsing).
+- Loading (5.8): packages are found by `FPackageId::FromName(name)` (CityHash64 of the lowercase
+  UTF-16 name) through the store; the directory-index path plays no part in loading, only in
+  discovery by path (mod loaders, tools). A package's imports are resolved through its store
+  entry's imported-package list (`AsyncLoading2.cpp` ~5579; the import map holds indices into it).
+  Cooked 5.3+ packages also carry `ImportedPackageNames` (written unconditionally by
+  `PackageStoreOptimizer`), which the runtime doesn't read.
+- Bulk chunks: id = the owning package's id, index 0, kind BulkData (`.ubulk`), OptionalBulkData
+  (`.uptnl`), MemoryMappedBulkData (`.m.ubulk`, 16 KiB aligned).
 
 ---
 
 ## 2. Architecture
 
-### 2.1 Layers
+### 2.1 Plugin (this repo, cdylib)
 ```
-uetoc.wcx64 (cdylib, this repo)
- ├─ lib.rs       TC exports (W + ANSI), panic guard on each export (from uepak)
- ├─ read.rs      .ucas/.utoc resolution, global check, key lookup, ReadHeader, extract/test
- ├─ archive.rs   listing model: mount folders, files, $chunks folder, info file
- ├─ global.rs    global container lookup (§3.2)
- ├─ info.rs      info-file text renderer (§5)
- ├─ profile.rs   game profile per container (§2.2)
- ├─ keys.rs, dialog.rs   uetoc.keys.json + key dialog (from uepak)
- └─ config.rs, view.rs, log.rs, progress.rs, win.rs, ffi.rs  (from uepak)
-iostore crate (Civ01/retoc, branch tcl-iostore, workspace member `iostore/`)
- └─ container layer: TOC parse, partitions, streaming block reader, AES, decompression,
-    hash checks, directory index, container header summary, GameProfile
+lib.rs          TC exports (W + ANSI stubs), panic guard on each export
+read.rs         open .ucas/.utoc, global check, key lookup, ReadHeader, extract/test
+archive.rs      listing: mount folders, files, $chunks, $legacy, info file
+global.rs       global container lookup (§3.2)        info.rs     info file (§5)
+legacy.rs       $legacy conversion session (§7)        profile.rs  game profile per container
+pack.rs         packing: game index, plan, apply, undo, compact, new containers (§8)
+add.rs          new files: ids, store entries, path↔name rules, question texts (§8.4)
+validate.rs     ValidateOnReplace checks (§8.5)
+pack_settings.rs  Configure dialog form ↔ [Pack] options (§8.8)
+source_stream.rs  :uetoc.source stream (§9)
+keys.rs, dialog.rs, busy.rs, config.rs, view.rs, log.rs, progress.rs, win.rs, ffi.rs (from uepak)
 ```
-**Deviation from v0 (decided while implementing):** retoc's library uses `tracing`/`serde`
-throughout, so instead of feature-gating it the container layer is a new lean crate `iostore`
-in the fork's workspace (deps: aes, sha1, blake3, flate2, lz4_flex, zstd, thiserror,
-oodle_loader). retoc's own code is untouched and can move onto `iostore` later (writer,
-conversion). Dependency: `iostore = { git = "https://github.com/Civ01/retoc", branch =
-"tcl-iostore" }`. For local work against a checkout, a `[patch]` in a `.cargo/config.toml`
-outside the repo. Build: `x86_64-pc-windows-gnu` (mingw cross-build) or MSVC (CI), cdylib only
-(LTO; see the uepak gotcha), stripped: 0.84 MB.
+Build: `x86_64-pc-windows-gnu` (mingw) or MSVC (CI), LTO, stripped, ~2 MB.
 
-### 2.2 Game profiles (hook for later custom-game support) **[proposed]**
-Every byte read from a `.utoc`/`.ucas` goes through a `GameProfile` the reader is opened with:
-- TOC header (magic, extra fields), TOC body decryption, chunk offset decoding,
-  block entry layout, block decryption, compression-method name mapping, directory-index
-  decryption, path fix-ups.
-- Phase 1 ships only `Vanilla`. The trait is in the fork (`retoc::profile`) so CUE4Parse ports
-  land in one place.
-- Selecting a profile later: stored per folder like keys (`uetoc.profiles.json`), offered in a
-  prompt when a vanilla read fails. Errors from the reader carry enough detail
-  (`UnknownMagic`, `BadDirectoryIndex`, `UnknownCompression(name)`, `DecodeFailed{block}`) to
-  decide when to prompt.
+### 2.2 Fork (`Civ01/retoc`, branch `tcl-iostore`; `master` untouched)
+- New lean crate **`iostore`** (workspace member): TOC parse/serialize, partitions, positional
+  streaming reads (`ChunkReader::next_piece`), AES, Zlib/Gzip/LZ4/Zstd/Oodle (`oodle_loader` from
+  Civ01/repak, no download), hash checks, directory index, `GameProfile` + `Vanilla`; writer
+  `edit::ContainerEdit` (open/create, replace, add, add_raw, remove, finish via temp + rename,
+  rollback, `UndoRecord`), block writer, UE's perfect hash, directory-index writer. No panics on
+  bad input (fuzz-style tests). TOC (119 TOCs), perfect hash (103), directory index (79) and
+  container header (73) round trips are byte-identical to UE's.
+- **`retoc`** crate, used for conversion: `ChunkDataSource` + `IoStoreContainer::open_with_source`
+  (retoc parses, `iostore` reads the data), `backend_from_containers`,
+  `build_legacy_without_bulk_data`, Gzip method, container-header edits (soft references kept),
+  8-byte shader hashes, `EngineVersion::UE5_8`, and the legacy-header fixes of §7.3.
+- Dependency: `iostore`/`retoc` = git, branch `tcl-iostore`. Local work: a `[patch]` in a
+  `.cargo/config.toml` outside the repo (sandbox: it rewrites `Cargo.lock` on every build, so
+  `git checkout Cargo.lock` before committing; CI builds `--locked`).
+
+### 2.3 Game profiles
+Every read goes through a `GameProfile` (magic, TOC preparation, decryption, compression names).
+Only `Vanilla` exists; CUE4Parse ports land there (N4). Reader errors (`UnknownMagic`,
+`BadDirectoryIndex`, `UnknownCompression`, `DecodeFailed{block}`) are detailed enough to decide
+when to offer a profile.
 
 ---
 
 ## 3. Opening
 
-### 3.1 Which file **[decided]**
-TC associates both `.utoc` and `.ucas` with `uetoc.wcx64`.
+### 3.1 Which file
+TC associates `.utoc` and `.ucas` with the plugin.
 
-| Opened file | `[Options] OpenUtocAsVirtualFile=1` (default) | `=0` |
+| Opened | `[Options] OpenUtocAsVirtualFile=1` (default) | `=0` |
 |---|---|---|
-| `X.ucas` | full listing (§4) | full listing (§4) |
-| `X.utoc` | one file: `<ContainerId>.txt` (§5) | same as opening `X.ucas` |
-| `X_s1.ucas` (partition) | as opening `X.ucas` **[proposed]** | same |
+| `X.ucas` (or `X_s1.ucas`) | full listing (§4) | full listing |
+| `X.utoc` | one file `<ContainerId>.txt` (§5; decimal `FIoContainerId`) | as `X.ucas` |
 
-- `X.ucas` needs `X.utoc` in the same folder; missing → "X.utoc not found next to X.ucas".
-- `<ContainerId>` = the header's `FIoContainerId` as an unsigned decimal (e.g.
-  `10437857082156768155`).
-- `CanYouHandleThisFile`: `.utoc` by magic; `.ucas` has no magic, so: a same-named `.utoc` with
-  valid magic exists **[proposed]**.
+`.ucas` needs a same-named `.utoc` ("X.utoc not found next to X.ucas"). `CanYouHandleThisFile`:
+`.utoc` by magic, `.ucas` when a same-named `.utoc` has it.
 
-### 3.2 Global container (mandatory) **[decided]**
-A container opens only when a valid global container is found (the global itself counts as
-its own global).
-
-**Lookup:** `global.utoc` + `global.ucas` in the container's folder, then each parent folder,
-up to `[Options] GlobalParentLookupLimit` parent levels (default **5** [proposed]). If the path
-contains a folder named `Paks` (case-insensitive, nearest one going up), the search never goes
-above it: `…\Paks\~mods\Sub\X.ucas` checks `Sub`, `~mods`, `Paks` and stops. Without a `Paks`
-folder in the path it walks up to the limit.
-
-**Valid:** both files exist, the TOC parses, and it contains the script-objects chunk
-(`ScriptObjects` in 5.x; `LoaderInitialLoadMeta` + `LoaderGlobalNames` in 4.27, whose global
-holds types 7–9: InitialLoadMeta, GlobalNames, GlobalNameHashes). The check needs no key
-(chunk ids aren't encrypted).
-
-**Version mismatch** (global TOC version ≠ container TOC version): accepted with a warning
-**[decided]**. The warning is logged every time and shown as a popup once per
-(global, container folder) per TC session **[proposed]**, so Find Files over a folder doesn't
-show one per container.
-
-**Not found:** warning naming the folders searched and why the search stopped (limit or `Paks`
-boundary), then the archive isn't opened (`E_EABORTED`) **[decided]**. TC then adds its own
-"Error in packed file" (it does for any failed open, §12a); keeping both messages
-**[decided 2026-11-19]**. Cached per folder
-for 10 s so TC's repeated opens don't repeat the popup **[proposed]**.
-
-In phase 1 the global is only validated and named in the info file. It's needed later for
-conversion and Zen-aware packing.
+### 3.2 Global container (mandatory)
+A container opens only with a valid global (the global counts as its own).
+- **Lookup:** `global.utoc/.ucas` in the container's folder, then parents up to
+  `GlobalParentLookupLimit` (default 5), never above the nearest folder named `Paks`.
+- **Valid:** both files, the TOC parses, it has the script-objects chunk(s) (no key needed).
+- **TOC version mismatch:** accepted, logged, one popup per (global, folder) per session.
+- **Not found:** warning naming the folders searched and why the search stopped; archive not
+  opened (`E_EABORTED`; TC adds its own "Error in packed file", kept). Cached 10 s per folder.
+- The global is used by `$legacy` (§7) and packing (§8): the game = every container under the
+  global's folder.
 
 ---
 
 ## 4. Listing (`.ucas`)
+- Directory-index files with raw bytes as stored (Zen `.uasset/.umap`, `.ubulk`, `.uptnl`,
+  `.m.ubulk`, `.ushaderbytecode`, …), as FModel shows them.
+- Mount point as in uepak: `[Options] MountPoint=Folder|Root`, `MountFolderAttr`; same
+  base/visible split (`../../../Moadra/Content/Mods/DebugInfo/` → folders `Moadra\Content\…`).
+- Unpacked size = chunk length; packed = sum of its blocks; date = the `.utoc` time.
+- Unsafe paths (`..`, absolute, `:`, empty parts) are skipped and logged.
+- **`$chunks`** (hidden, `VirtualFolderAttr`): every chunk without a path as
+  `<24 hex id>.<ChunkType>`, extractable raw.
+- **`$legacy`** (hidden): §7.
+- A key is asked on open only when the directory index is encrypted.
 
-- Entries: the directory index, mount point included, raw bytes as stored (Zen `.uasset/.umap`,
-  `.ubulk`, `.uptnl`, `.m.ubulk`, `.ushaderbytecode`, …), as FModel/CUE4Parse show them
-  **[decided]**.
-- View modes: same as uepak (`[Options] MountPoint=Folder|Root`, `MountFolderAttr`), same
-  base/visible split of the mount point (e.g. `../../../Moadra/Content/Mods/DebugInfo/`)
-  **[proposed]**.
-- Unpacked size: the chunk's length. Packed size: the sum of its blocks' compressed sizes (blocks
-  are never shared between chunks). Date: the `.utoc` modification time.
-- Path safety: entries containing `..`, absolute paths, `:` or empty components are skipped and
-  logged (as uepak).
-- **Unnamed chunks** **[decided]**: every chunk not referenced by the directory index is listed in
-  a hidden folder `$chunks` at the panel root (attribute from `[Options] VirtualFolderAttr`,
-  default `Hidden`) as `<24 hex chunk id>.<ChunkType>`, e.g.
-  `b53fffed16aaad1300000006.ContainerHeader`. Extracting gives the raw chunk bytes.
-- No AES key needed unless the directory index is encrypted (`Encrypted` flag); then the key
-  is asked on open.
-
-## 5. Info file (`<ContainerId>.txt`) **[decided]**
-Generated in memory on open; UTF-8 with BOM, CRLF; listed with its real size and the `.utoc`
-date; extract/F3 gives the text.
-
-**Layout: fixed-width, for a monospace font** (Lister's default) **[decided 2026-11-19]**,
-replacing the earlier tab-separated layout:
-- Sections `[Container]`, `[Header]`, `[ContainerHeader]`, `[Signatures]`, `[Files]`.
-- Key/value lines: keys padded to one column width per file (`Key ......... value` style
-  without dots: `Key` + spaces), values start in the same column in every section.
-- Two tables, each with a header row + a separator row of `-`, columns padded with spaces to
-  the widest value, numbers right-aligned (with `,` thousands separators), text left-aligned.
-  Same rows in both (directory-index order, then unnamed chunks), linked by `#` (TOC entry
-  index). Two narrow tables instead of one ~170-character table, because Lister wraps long
-  lines by default:
-  - `[Files]`: #, type, size, packed, compression, path (last, so long paths push nothing).
-  - `[Chunks]`: #, chunk id, partition, offset in the data file, blocks, flags, hash.
-- Only ASCII outside paths (no box-drawing characters), so any font/codepage lines up.
-- If the directory index is encrypted and no key is available, paths read `(encrypted)` and
-  the file still opens.
+## 5. Info file (`<ContainerId>.txt`)
+In memory, UTF-8 BOM, CRLF, fixed-width for a monospace font: sections `[Container]`, `[Header]`,
+`[ContainerHeader]`, `[Signatures]`, `[Files]` (#, type, size, packed, compression, path) and
+`[Chunks]` (#, id, partition, offset, blocks, flags, hash), the two tables linked by `#`, ASCII
+only outside paths. Encrypted index without a key: paths read `(encrypted)`.
 
 ## 6. Extraction and testing
+As uepak: one block at a time (decrypt, decompress), constant memory, progress + Cancel per
+block, partial files deleted on failure. Errors: `E_ECREATE`, `E_EWRITE`, `E_BAD_DATA`
+(decode/hash), `E_NOT_SUPPORTED` (missing Oodle, with a warning), `E_EABORTED` (key cancelled).
+`PK_TEST` decodes every block and checks the chunk hash (all-zero hashes only decoded);
+extraction logs a hash mismatch but keeps the file *(default; custom games may hash
+differently)*. Block signatures are shown in the info file, not checked (rule unknown, §15).
+Background unpack supported.
 
-As uepak §3.3:
-- Streaming one block at a time (decrypt the 16-aligned block, decompress), constant memory,
-  progress and Cancel per block; partial files deleted on failure.
-- Errors: create → `E_ECREATE`, write → `E_EWRITE`, decode/hash → `E_BAD_DATA`, missing Oodle →
-  warning + `E_NOT_SUPPORTED`, key prompt cancelled → `E_EABORTED`.
-- `PK_TEST`: decode every block and check the chunk hash (SHA-1 for TOC v3, BLAKE3-160 for v5+;
-  a chunk whose hash is all zero is only decoded); a mismatch → `E_BAD_DATA`. Extraction
-  computes the same hash but only logs a mismatch and keeps the file (a custom game may hash
-  differently) **[proposed]**. Block signatures (`Signed`) are reported in the
-  info file but not checked **[proposed]**: retoc notes they don't match a plain SHA-1 of the
-  stored bytes; to be investigated with TheIsle.
+---
 
-## 6a. Legacy view (`$legacy`, N3) **[decided 2026-11-19]**
-Extracting Zen packages as legacy cooked files (what a `.pak` holds), using retoc's `to-legacy`
-code (`asset_conversion::build_legacy`, `shader_library::rebuild_shader_library_from_io_store`).
+## 7. Legacy view (`$legacy`, N3)
+Zen packages extracted as legacy cooked files, using retoc's `to-legacy` code through the fork's
+data hook (one code path: partitions, AES, Oodle from `deps\`).
 
-**Listing.** A hidden folder `$legacy` at the panel root (attribute `VirtualFolderAttr`, like
-`$chunks`) mirrors the container's file tree, mount point included, with legacy names:
-- each package (`.uasset`/`.umap` with an `ExportBundleData` chunk) → `X.uasset` (or `.umap`) +
-  `X.uexp` (converted), followed by its `X.ubulk` / `X.uptnl` / `X.m.ubulk`: those are the bulk
-  chunks' bytes unchanged (as retoc writes them), so they are streamed like raw files, with real
-  sizes and no memory cost (a 3.5 GB bulk chunk never sits in memory);
-- each shader library (`ShaderArchive-*.ushaderbytecode`) → the rebuilt legacy library + its
-  `ShaderAssetInfo-*.assetinfo.json`;
-- the global container's `$legacy` also holds `scriptobjects.bin` (UE 5.0+ only; retoc writes it
-  for `to-zen` round trips);
-- every other file (`.ini`, `.locres`, `AssetRegistry.bin`, …) as is.
-Raw files stay where they are; `$legacy` is extra. Sizes of converted files in the listing are
-estimates (the Zen package size for `.uasset`, 0 for `.uexp` and the asset-info JSON) **[proposed]**:
-the real size is only known after conversion.
+**Listing.** `$legacy` mirrors the container's tree with legacy names:
+- each package → `X.uasset`/`.umap` + `X.uexp` (converted) and its `.ubulk`/`.uptnl`/`.m.ubulk`
+  (the bulk chunks unchanged, streamed raw; a 3.5 GB chunk never sits in memory);
+- each shader library → the rebuilt legacy library + `ShaderAssetInfo-*.assetinfo.json`;
+- the global's `$legacy` also holds `scriptobjects.bin` (5.0+);
+- other files as they are. Sizes of converted files are estimates until converted.
 
-**Conversion.** On extract/test of a `$legacy` file the package is converted in memory once; its
-other files (`.uexp`, bulk) come from the same result (listed next to each other, so TC asks for
-them in a row). A failed conversion → `E_BAD_DATA` for that package's files, reason in the log.
+**Conversion.** A package is converted once per extract; its other files come from the same result.
+Failure → `E_BAD_DATA` for its files, reason logged. Imports are resolved over every `.utoc` under
+the global's folder (opened lazily, TOCs only, cached for the session; containers with another
+container-header version or an unknown key are skipped, no prompts). Unresolvable imports become
+retoc's `/Engine/UnknownPackage` placeholders (logged). Shader asset info is built from the store
+entries of all loaded containers.
 
-**Imports from other containers** **[decided]**: on the first legacy extraction the plugin opens
-every `.utoc` in the global's folder and its subfolders (lazily, cached for the TC session; TOCs
-only, data read on demand) and resolves imports across all of them. Containers with another TOC or
-container-header version, or encrypted with no known key (keys file or already entered), are
-skipped with a log line; no key prompts for them **[proposed]**. Imports that still can't be
-resolved become retoc's `/Engine/UnknownPackage` placeholders and are logged **[proposed]**.
-Shader asset info is built as retoc does, over all loaded containers: package store entries
-say which packages use the library, and only those packages are read.
+### 7.1 Engine version
+`[Options] LegacyEngineVersion=Auto|UE4_27|UE5_0 … UE5_8`.
+- `Auto`: from TOC + container-header versions (unique for 4.27, 5.0, 5.1/5.2 — told apart per
+  package —, 5.3, 5.4, 5.5), narrowed for 5.6–5.8 by the shader hash size in the store entries
+  (8 bytes ⇒ 5.8; 20 ⇒ 5.6/5.7) and, for versioned packages, by their custom versions (5.7 =
+  UE5Release 61 / UE5Main 121 / FortniteMain 225; 5.8 = 68 / 123 / 268).
+- Still ambiguous (unversioned 5.6/5.7/5.8 without shader maps): a prompt lists the versions that
+  fit (ini value preselected, else the newest), with *Remember* (on; writes the ini) and *Don't ask
+  again for this container* (until another container is opened). Cancel → `E_EABORTED`.
+- A fixed ini value is used only if it fits the container's container-header version, else Auto.
+- Packages with their own versions ignore all of this.
 
-**Engine version** **[decided]**: `[Options] LegacyEngineVersion=Auto` (or `UE4_27`, `UE5_0` …
-`UE5_8`). 5.7 and 5.8 share the object version (1018) but **not the legacy layout**: UE 5.8 writes
-`PackageName` into the imports of cooked packages too (ObjectName stands in for None), earlier
-engines only uncooked (found 2026-11-19 via tcl-uassetvw; retoc never wrote it — fixed in the fork,
-195bf45). How 5.8 is told apart: 8-byte shader hashes in the store entries (§6a.1); for versioned
-packages their custom versions (FUE5ReleaseStream/UE5MainStream/FortniteMainBranch above the 5.7
-values 61/121/225, measured on the samples); else the prompt offers 5.6 / 5.7 / 5.8 separately.
-- `Auto`: derived from the TOC + container-header versions (retoc's heuristics, 5.1/5.2 told
-  apart per package by bulk data). Unique for 4.27, 5.0, 5.1/5.2, 5.3, 5.4, 5.5.
-- The heuristic **fails** when it gives no version (unknown combination) or several (container
-  header `SoftPackageReferencesOffset` = 5.6, 5.7 and 5.8; 5.7+ adds import type hierarchies to
-  the legacy header). Then a prompt lists the versions that fit, the ini value preselected
-  (with `Auto`: the newest candidate) **[proposed]**, and two checkboxes:
-  - *Remember (save to `uetoc.ini`)*, on by default: writes `LegacyEngineVersion`;
-  - *Don't ask again for this container*: the pick holds until a different container is
-    opened (any TC operation in between keeps it).
-  Cancel aborts the extraction (`E_EABORTED`).
-- A fixed ini value is used only if it fits the container (same container-header version as
-  that engine writes); otherwise it is ignored for that container (log line) and `Auto` applies,
-  so a remembered 5.7 never breaks a 4.27 game **[proposed]**.
-- Packages that carry their own versions (uncooked/versioned) ignore all of this.
+### 7.2 UE 5.8 specifics
+- `FShaderHash` is 8 bytes (was 20) with no format version change: store entries, IoStore shader
+  libraries (size detected from the buffers), legacy library version 3, asset info version 2.
+  5.8 shader-group chunk ids are xxHash128 (only matters for to-zen, N2).
+- UE 5.8 writes `FObjectImport::PackageName` in cooked packages too (ObjectName stands in for None);
+  earlier engines only uncooked.
+- Zen `_Unused` (was CookedHeaderSize): ≤5.6 legacy header size, 5.7.0–5.7.4 size − 8, 5.8
+  size − 8 − 8 × imports. Harmless for `$legacy`; N2 must write it.
 
-**Results (2026-11-19).** Byte-identical to retoc's own `to-legacy` (CLI, same folder) for every
-file: all vanilla samples 4.27–5.8 incl. encrypted 4.27 (490 files), G1R (1,685), compressed 5.8
-zlib/gzip/lz4 (220), The Isle server pakchunk2 (73,149, unversioned 5.6, prompt answered 5.6),
-ARK server pakchunk0+11 (328,189, unversioned, prompt answered 5.6) — ARK's 328k files convert in
-~1 min, store setup (3 containers, 19 MB of TOCs) well under a second. Versioned samples never
-prompt. Shader libraries: see §6a.1.
+### 7.3 Differences from the engine's own cook
+Measured on the 5.8 SML sample (engine cook of `BP_SML`, `BP_Monitor`, `M_dummy`, `T_dummy`) with an
+independent header parser written from UE 5.8.4 source:
+- **Same:** `.uexp` byte-identical; summary versions and custom versions, package flags,
+  `PackageSource`, exports (sizes, flags, outers, templates, `bIsAsset`, script serialization
+  offsets), every import except the classes below; shader libraries same content (code identical
+  after decompression; `tools/shaderlib_compare.py`).
+- **Engine struct/enum imports get class `Object`** (engine: `ScriptStruct`/`Enum`): Zen doesn't
+  record it, the legacy loader finds native imports by class and `Object` always matches, while
+  the name rule (`E` + uppercase = Enum, else ScriptStruct) is wrong for some engine enums
+  (`TextureGroup`, `ACLCompressionLevel`). `LegacyGuessScriptTypes=1` guesses by name (better for
+  viewers). Consequence: up to two names fewer (`Enum`, `ScriptStruct`), every later offset moves.
+  Functions are exact (`Function` inside native classes and for `*__DelegateSignature`).
+- **`SavedHash`** = BLAKE3-160 of our own `.uasset` + `.uexp` (UE's rule), so it differs whenever
+  the header does. Only the editor copies it; nothing checks it.
+- **Zen losses:** preload dependencies on script objects (BP_SML 205 → 127, BP_Monitor 37 → 33),
+  name order, `NamesReferencedFromExportDataCount` over-counted (safe).
+- Not investigated: `bNotAlwaysLoadedForEditorGame` (engine 1 on M_dummy/T_dummy, retoc 0).
+- Results: byte-identical to retoc's CLI `to-legacy` on all samples, The Isle server (73k files),
+  ARK pakchunk0+11 (328k files, ~1 min).
 
-### 6a.1 UE 5.8 shader hashes (N3b) **[found 2026-11-19]**
-Sample `IOStore_UEVanilla58_test_containers_SHADERBYTECODE.7z` (project Moadra, SM5, one dummy
-material + texture): the same cook packaged with IoStore (`iostore\pakchunk0`) and as a plain
-`.pak` (`pak\pakchunk0/2/11`). The `.pak` holds the engine's own legacy files for the same
-content (`M_dummy`, `T_dummy` `.uasset/.uexp`, `ShaderArchive-Global/Moadra_Chunk0-PCD3D_SM5-…
-.ushaderbytecode`), so it is a reference that doesn't depend on retoc.
+---
 
-UE 5.8 shortened `FShaderHash` from 20 bytes (SHA-1) to **8 bytes**, with no container-header or
-IoStore-library version change (CUE4Parse keys it on `GAME_UE5_8`). It affects:
-- container header store entries (`ShaderMapHashes`): retoc reads 20-byte hashes and fails
-  ("Package metadata will be unavailable"), so **every package of a 5.8 container whose
-  materials have shader maps fails to convert**, not only the libraries (the earlier 5.8 samples
-  had no shader maps, so they passed);
-- the IoStore shader library (`ShaderMapHashes`, `ShaderHashes`; library version still 1) and the
-  shader-group chunk ids derived from hashes;
-- the legacy library (`FSerializedShaderArchive`): version **3** in 5.8 (retoc writes/expects 2),
-  8-byte hashes;
-- the shader asset info JSON (hash strings).
+## 8. Packing (N1, N1b)
+Input: raw Zen files as the plugin extracts them (directory-index files, `$chunks` files). TC
+calls `PackFiles` once per F5/Alt+F5, so "per copy" = per call. Reference: UnrealReZen (patches
+only packages the game has, reusing chunk id + store entry; writes an empty `.pak`) — this plugin
+goes further with new files (§8.4).
 
-**Done (2026-11-19)** — plan as below, all steps carried out:
-- retoc fork 7346193: `FShaderHash` (8 or 20 bytes) everywhere shader hashes live; size detected
-  from the store-entry buffer (exact) and from the IoStore library header (the size that parses
-  the chunk exactly); legacy library v3 for 8-byte hashes; asset info `AssetInfoVersion: 2`;
-  `EngineVersion::UE5_8`; to-zen of v3 libraries refuses for now (5.8 shader group ids are
-  xxHash128 over the hashes, N2).
-- Plugin: `UE5_8` in the ini/prompt. Candidates are narrowed by the shader hash size found in the
-  loaded containers' store entries: 8 bytes ⇒ 5.8, no prompt; 20 bytes ⇒ 5.6 or 5.7; none (e.g.
-  server builds) ⇒ versioned packages decide by custom versions, unversioned ones ask 5.6/5.7/5.8.
-  (An earlier "UE 5.7 / 5.8" merged entry was wrong: see the import layout above.)
-- Results on the sample: no prompt; shader libraries **same content as the engine's** (both the
-  cook's `ShaderLibrarySource` and the `.pak`: 301 maps / 3,767 shaders and 4 / 36, code
-  identical after decompression; `tools/shaderlib_compare.py`); `.uexp` byte-identical to the
-  `.pak`; `.uasset` equivalent but not byte-identical. After the PackageName fix the import maps match the
-  engine's except retoc's class name `Object` for imports of script functions/structs (engine:
-  `Function`/`ScriptStruct`; script objects carry no class; functions fixed in §6a.2), plus the saved package hash, name
-  hashes, package source CRC and fewer preload dependencies (BP_SML: 127 vs 205) — all versions,
-  Zen drops or retoc approximates them; asset info lists only
-  packages present in the containers (engine also lists plugin materials and global "None"
-  entries). Earlier samples unchanged (byte-identical to the previous references).
-- TC check (N3b only): F5 of `$legacy` from the sample, no prompt, log shows hash size 8;
-  files identical to the sandbox run except the Global library (34 bytes smaller: the Windows
-  Oodle DLL compresses a few shaders differently from the Linux build; same content).
-- Side finding for uepak: the sample `.pak` says Zlib, but its entries are gzip streams
-  (`1f 8b`); repak unpacked them still compressed. To check in tcl-uepak.
+### 8.1 What happens to each file
+The game = every container under the global's folder. Each input is classified (`pack::plan`):
 
-Plan:
-1. Sample: add `global.utoc/.ucas` of the IoStore build (required; missing from the upload);
-   optionally `Saved\Cooked\Windows\Moadra\Metadata\ShaderLibrarySource\ShaderAssetInfo-*.assetinfo.json`
-   (not staged into the `.pak`) as reference for the asset info.
-2. Fork (retoc): hash size as a parameter: detect it in the container header (entry buffer size
-   is exact: 16·n + 8·imports + h·shader maps, h ∈ {8, 20}) and in the IoStore library (array sizes
-   against chunk length); add `EngineVersion::UE5_8` (TOC v8, header v5, object version 1018,
-   8-byte shader hashes, legacy library v3); read/write legacy library v3. Same change is needed
-   later for `to-zen` (N2).
-3. Plugin: `UE5_8` in `LegacyEngineVersion`/prompt; the version heuristic uses the hash size
-   (8 bytes ⇒ 5.8), which also removes the 5.6/5.7-vs-5.8 prompt for any container with shader
-   maps; 5.7 vs 5.8 without shader maps stays a prompt (identical otherwise).
-4. Tests: `$legacy` of the IoStore sample against the `.pak` reference: packages byte-identical
-   if the cook is deterministic (else field-wise), shader libraries compared by content (shader
-   map/shader hashes, shader code bytes, entries; order and compression may differ), asset info
-   by content. Plus all earlier samples unchanged (5.7-and-older 20-byte path).
+| Input | Result |
+|---|---|
+| a file the game has at the same path, in the target container | **replace**: chunk id, path, store entry kept; data replaced |
+| a file the game has at the same path in another container | **copy**: that container's chunk id, path and store entry |
+| a `$chunks` file | matched by chunk id (file name), as above |
+| a package/bulk file the game doesn't have | **new file** (§8.4) |
 
-**Integration.** retoc's conversion runs on its own container type (`IoStoreTrait`); the fork adds
-a chunk-data hook so its reads go through the `iostore` crate (partitions, AES, Oodle from
-`deps\`, one code path) and a backend built from a chosen list of containers. No `.pak` writing
-(repak) is linked into the plugin for this.
+Refused — whole copy cancelled, one message listing the files by reason, nothing written:
+- files that belong in the companion `.pak` (`.ini`, `.locres`, `AssetRegistry.bin`, `.uplugin`, …);
+- legacy cooked files (`.uasset` with the legacy magic, `.uexp`): N2;
+- other new chunk files (shader libraries, …) and new files that can't be added (§8.4);
+- anything into `$legacy`, into the global container, or `ContainerHeader` (always rebuilt).
 
-### 6a.2 Review of the fork against UE 5.8 **[2026-11-19]**
-Sample `5.8_samples_full_same_asset.7z` (SML mod, 16 packages; versioned = tagged properties and
-unversioned containers, each with the engine's own cook of `BP_SML`), compared with an independent
-header parser written from the UE 5.8.4 source. 5.8 changed no Zen/IoStore format version (TOC v8,
-container header v5, Zen package v3, export map, script objects). `.uexp` byte-identical.
+Path of a dropped file: existing container = its mount point + the TC path (Folder view: the
+visible folders are part of the TC path); new container = §8.3.
 
-Fixed (retoc fork 66f361d, plugin uses it):
-- **Script import classes** (all versions): retoc wrote `Object` for every script import that is
-  not a package, class or CDO. Now `Function` inside a native class and for top-level
-  `*__DelegateSignature`. Top-level structs/enums stay `Object` by default: Zen doesn't say which,
-  the legacy loader finds native imports by class (`FindImportFast(class, outer, name)`), so a wrong
-  guess fails the import while `Object` always matches, and the obvious name rule (`E` + uppercase =
-  enum) is wrong for real engine enums (`ACLCompressionLevel`, `TextureGroup`, …) and structs
-  (`FEQS…`). `[Options] LegacyGuessScriptTypes=1` turns the name guess on (better for viewers).
-  BP_SML: imports match the engine except the 5 top-level structs; all match with the guess.
-- **`bIsAsset`** (all versions): UE's rule (`UObject::IsAsset`): top-level, `RF_Public`, not CDO or
-  transient, not a plain `UClass` (Blueprint/Verse classes override `UClass::IsAsset`). retoc also
-  required `Standalone|Transactional`, so every Blueprint class asset had 0 (15 of 16 packages).
+Delete (F8): directory-index and `$chunks` files (not `ContainerHeader`; folders as `*.*`); a
+deleted package loses its store entry.
 
-Also fixed on request although they don't affect loading (retoc fork 0717d17; UE 5.8.4 source):
-- **`PackageSource`** = `FCrc::StrCrc_DEPRECATED(upper(file base name))` (2-byte chars), now written
-  exactly (BP_SML, M_dummy, T_dummy match the engine). Not read by `FLinkerLoad`, the Zen loader or
-  `UPackage`; shipping editors even write a random value.
-- **`SavedHash`** = BLAKE3-160 of `.uasset` + `.uexp` without the 4-byte footer, field zeroed; now
-  computed over our own output (valid, equals the engine's only where the header does). Only
-  copied into `UPackage` in editor builds; not checked.
-- **`ScriptSerializationStart/EndOffset`** (only packages with tagged properties, i.e. without
-  `PKG_UnversionedProperties`; the Zen loader never sees them): retoc wrote `(0, SerialSize)`;
-  `FLinkerLoad::MarkScriptSerializationStart/End` `checkf` them against the real positions, so such a
-  file asserted when loaded through the legacy loader in builds with checks (editor,
-  Debug/Development); Shipping compiles the check out. Now the real range: walk the tag stream
-  (control byte, tags carrying their sizes; 5.4+ and 5.2/5.3 layouts) to its `None`; an export that
-  doesn't parse keeps the old value. Matches the engine on BP_SML (class 0–38, CDO 0–130, functions
-  0–9), M_dummy (0–99) and the 1 MB T_dummy (0–131).
-- Seen while checking, not fixed: `bNotAlwaysLoadedForEditorGame` (engine 1 on M_dummy/T_dummy,
-  retoc 0; editor-game flag, not found in `FLinkerLoad`; not investigated further).
-- **Zen `_Unused` (was CookedHeaderSize)**: UE ≤5.6 stores the legacy header size; 5.7.0–5.7.4
-  store size − 8; 5.8 size − 8 − 8 × imports (PackageStoreOptimizer.cpp, frozen to keep patches
-  small). retoc treats it as the size: harmless for `$legacy` (padding only); N2 must write the
-  version's formula.
-- Inherent Zen losses: preload dependencies on script objects (BP_SML 205 → 127; retoc adds its own
-  class/template entries), name order, NamesReferencedFromExportDataCount over-counted (safe).
-- Backburner (retoc CLI): `--version UE5_8` help text ("same formats as 5.7"); a single `.utoc`
-  without its global fails with "does not contain ScriptObjects" (pass the folder).
+### 8.2 Changing an existing container (as uepak)
+- New data appended to the last `.ucas` partition (a new `_sN` when it would exceed the
+  partition size); `.utoc` rewritten via temp + rename.
+- Undo record `<name>.utoc.uetoc-undo` (old `.utoc` + partition lengths) before each change,
+  removed after success; rollback on error/cancel/panic; restore offered on the next open.
+- `Compact=1` rebuilds after every change, `AutoCompactUnder=10M` rebuilds small containers
+  (raw block copy into a new pair, swapped in via `.uetoc-old`).
+- Free-space check, per-container busy guard + `.uetoc-lock` across processes.
+- Encrypted: key from the read lookup, new blocks and index encrypted. Signed: confirmation, then
+  written unsigned.
+- **Mount point:** files outside it widen it to the deepest common folder (tcl-uepak §4.2.1); only
+  the index is rewritten, existing files keep their game paths. Shown in the §8.4 question with an
+  example (one existing entry before/after, where the game finds it, where added files go).
 
-## 6b. Packing raw Zen files (N1) **[done 2026-11-19]**
-Input is what the plugin extracts raw (directory-index files, `$chunks` files). Reference checked:
-UnrealReZen (only patches packages that exist in the game: finds each file by path in the game's
-containers, reuses its chunk ID and container-header store entry, skips the rest; writes a fixed
-empty `.pak` next to its container).
-
-**What may be packed** **[decided]**
-- Files the game has, with the same path (mount point + path): in the target container, else in
-  any container under the global's folder (the legacy view's store). Their chunk ID and, for
-  packages, their store entry (imported packages, shader map hashes) are reused (checked by
-  `ValidateOnReplace`, §6b.1). The new data replaces the chunk.
-- Files the game doesn't have: N1b, §6c (`PackMode` was removed with it; old ini lines are ignored).
-- **Refused, whole copy cancelled, one message listing the files** **[decided]**:
-  - files the game doesn't have that aren't packages or bulk files (§6c);
-  - files that live in the companion `.pak`, not in IoStore (`.ini`, `.locres`, `AssetRegistry.bin`,
-    `.uplugin`, `.uproject`, …: anything that isn't a package, bulk file or shader library);
-  - legacy cooked files (`.uasset` with the legacy magic, or `.uasset` + `.uexp`): N2;
-  - anything into `$legacy` (read-only view) or into the global container **[proposed]**.
-- `$chunks` files are matched by chunk ID (file name); `ContainerHeader` is never taken from input
-  (always rebuilt) **[proposed]**.
-- Delete (F8): directory-index files and `$chunks` files (not `ContainerHeader`); a deleted package
-  loses its store entry **[proposed]**.
-
-**Changing an existing container** **[decided: like uepak]**: new data appended to the `.ucas` (last
-partition; a new `_sN` partition when the partition size would be exceeded), `.utoc` rewritten
-(small); undo copy `<name>.utoc.uetoc-undo` with the old `.utoc` and the old partition lengths;
-rollback on error/cancel/panic, restore offered on next open; `Compact=1` rebuilds into a new pair
-(drops dead space), `AutoCompactUnder` (default 10 MB) always rebuilds small containers;
-`UndoLimit`; free-space check; per-container busy guard + cross-process lock (as uepak).
-- Encrypted containers: confirmation, key from the read lookup, new blocks and the rewritten index
-  encrypted with it (uepak rule) **[proposed]**.
-- **Signed containers** **[decided]**: confirmation that the game may reject an unsigned container;
-  then written unsigned (flag and signature data removed).
-
-**New container from scratch** (Alt+F5 to a `.ucas`/`.utoc` that doesn't exist)
-- Format taken from the game (the global and the other containers in its folder): TOC version,
-  container-header version, shader hash size; container ID = UE's (CityHash64 of the lowercase
-  container name) **[proposed]**; mount point from the Configure dialog (default `../../../`), paths
-  as TC gives them **[proposed]**; unencrypted, unsigned (uepak rule) **[proposed]**.
-- **Companion `.pak`** **[decided]**: offered only here (checkbox in the pack settings, ini
-  `WriteEmptyPak=1`): an empty `.pak` (empty index + footer, ~250 bytes, written by our own code, no
-  repak) named like the container, if none exists. Pak version **11** for every engine 4.27–5.8
-  (every reader accepts older pak versions; 11 = 4.26+). When off, `WarnPakNeeded=1` warns instead.
-- Name: no `_P` check (user's business) **[decided]**.
-
-**Compression** **[decided: match the game]**: the method of the container being changed; for a new
-container, the method most used by the game's other containers (None when they're uncompressed);
-override in the Configure dialog (None/Zlib/Gzip/LZ4/Oodle with levels, block size; Zstd not offered:
-UE has no Zstd format, §6a.1 note). Store-if-not-smaller per block **[proposed]**.
-
-**Writer** (`iostore` crate) **[proposed]**: TOC v3/5/6/8, chunk hashes (SHA-1 ≤ v3, BLAKE3/20
-later), blocks with compression + AES-ECB padding as UE, perfect-hash chunk table (v4+; UE's
-algorithm), directory index (encrypted when the container is), partitions, meta flags, TOC
-signature data dropped. Container header (de)serialized with the fork's `retoc::container_header`.
-
-**Configure dialog** (packing part) **[done 2026-11-20, see As built]**: compression (Match game / methods + level),
-block size, ValidateOnAdd (was PackMode, §6c), ValidateOnReplace, Compact, AutoCompactUnder,
-UndoLimit, WriteEmptyPak, mount point for new containers, WarnPakNeeded.
-
-**Tests** **[proposed]**: round trips on every sample (extract raw → replace all → container reads
-back chunk-for-chunk identical; container header store entries unchanged); modify/undo/rollback/
-compact as uepak; encrypted 4.27 and The Isle; the empty `.pak` read by repak; TC check of the new
-pieces only; a game load test by the user (patch container + empty `.pak`).
-
-**As built (2026-11-19)** — differences from the plan above:
-- Writer: `iostore::edit::ContainerEdit` (open/create, replace, add, add_raw, remove, finish via
-  temp + rename, rollback) + `write.rs` (blocks), `perfect_hash.rs`, `dirindex.rs`; container
-  header edits in `retoc::container_header` (soft references kept). TOC round trip on 119
-  sample TOCs, perfect hash on 103 and directory index on 79 are byte-identical to UE's.
-- Undo: one `<name>.utoc.uetoc-undo` per container (old `.utoc` + partition lengths), written
-  before each change and removed after success; restore offered on the next open. No
-  `UndoLimit` (one record is all there is). New partitions are started when a block wouldn't fit
-  the partition size.
-- Encrypted containers: **no extra confirmation**; the key comes from the read lookup (prompt if
-  unknown) and new blocks + the directory index are encrypted with it.
-- Signed containers: confirmation, then written unsigned (as decided).
-- New container: TOC version, block size, compression from the game's containers; mount point
-  asked for each new container (§6b.2; was `NewMountPoint`). A replaced/added file outside an existing container's mount point
-  moves the mount point up to the common folder. Empty v11 `.pak` = 347 bytes, read by repak.
-- Refusals list every file by reason in one message (not in the game; companion-pak files; legacy
-  cooked files → N2; read-only: `$legacy`, the global, `ContainerHeader`); nothing is changed.
-- Delete accepts `*.*` (whole folders); an empty match is refused.
-- Compact: raw block copy into a new pair, swapped in through `.uetoc-old`; also run by
-  `AutoCompactUnder` (default 10M).
-- TC: caps 223 (NEW | MODIFY | MULTIPLE | DELETE | OPTIONS | BY_CONTENT | SEARCHTEXT),
-  `BACKGROUND_PACK`; **TC needs the ANSI `PackFiles`/`DeleteFiles` exports** even when the W
-  ones exist (without them: "Error packing files!" and no call); stubs added as in uepak.
-  Busy guard + `.uetoc-lock` from uepak.
-- Configure dialog (2026-11-20, `ConfigurePacker`, also the Configure button of TC's Alt+F5
-  dialog): Mode, Compression (Match the game / None / Zlib / Gzip / LZ4 / Oodle), Zlib/Gzip level,
-  Oodle compressor + level (level lists greyed when the method doesn't use them; Match keeps
-  both), Rebuild after every change, Rebuild containers smaller than (size with K/M/G), Write
-  empty `.pak`, Warn that a `.pak` is needed (only when no `.pak` is written), Ask for the mount
-  point + how many to remember (§6b.2; the Mount point field until 2026-11-23). File locations at the bottom. Bad
-  input shows a line in the dialog, which stays open. OK writes the `[Pack]` lines into the
-  settings ini, keeping every comment in its column. Form logic in `pack_settings.rs` (tested).
-  Block size and UndoLimit from the plan are not offered (block size comes from the game; one
-  undo record).
-- Not yet: ReplaceWithAddition (N1b), legacy input (N2).
-
-### 6b.2 Mount point of a new container **[done 2026-11-23]**
-
-Found by the user: a file dropped alone (`BP_SML.uasset`) with `NewMountPoint=../../../Moadra/
-Content/Mods/SML/` was refused ("the game already has … drop it there"), the same file with its
-folders (`Moadra\Content\Mods\SML\BP_SML.uasset`) packed fine. The setting only became the
-container's mount point; dropped paths were always `../../../` + their path in the copy. Decided
-(user, 2026-11-23): ask for the mount point every time, and both drops give the same result.
-
-- **Dialog** before every new container (`AskMountPoint=1`, default; 0 = the last one, no
+### 8.3 New container (Alt+F5 to a `.ucas` that doesn't exist)
+- Format from the game: TOC version and container-header version of the global/others, block size
+  most used, container id = CityHash64 of the lowercase name; unencrypted, unsigned. No `_P` check.
+- **Mount point dialog** before every new container (`AskMountPoint=1`; 0 = the last one, no
   dialog): editable dropdown with the remembered mount points (`RecentMountPoints`, newest first,
-  `MountPointHistory=10`, 0-50; saved by the plugin on OK, also when the copy is then refused),
-  the game's folder of each dropped package (by the name inside it; `../../../` left out, Auto
-  covers it) and Auto. Preset: the last one, else the first suggestion, else Auto. A preview line
-  shows where the first file goes and how many files the game has at their paths; text that
-  isn't a mount point disables OK. Cancel writes nothing and remembers nothing. Existing
-  containers aren't asked (they have a mount point; changes go through the §6c question).
-- **Paths** (`pack::new_container_full`): Auto = `../../../` + path, the mount point becomes the
-  files' common folder (as before). A mount point M: M + path, unless the path already starts
-  with M's folders (M without `../../../`, whole folders, case ignored): then `../../../` + path.
-  When both readings are possible the one the game has wins, else the full-path reading. Text
-  only, no knowledge of project or plugin names (`Engine`, `Paper2D`, a project called `Game`).
-  Every path ends up under M, so the existing "not under the mount point" check can't fire.
-- Lookup, `ValidateOnReplace`, `ValidateOnAdd`, refusals unchanged; they see the resolved paths.
-  Refusals of a new container end with "Mount point for the copied files: …".
-- Migration: a non-Auto `NewMountPoint` becomes a remembered entry; the key isn't written any
-  more.
-- Tests: `new_container_paths_from_the_mount_point` (rule), `new_container_mount_point_dialog`
-  (35 sample games: file alone with the suggestion, tree with the remembered one, Auto, wrong
-  mount point refused and named, bad text, Cancel, `AskMountPoint=0`, history order and size).
+  `MountPointHistory=10`, 0–50; saved on OK, not on Cancel), the game's folder of each dropped
+  package (by the name inside it; `../../../` left out) and `Auto`. Preset: the last one, else the
+  first suggestion, else Auto. A live preview shows where the first file goes and how many files
+  the game has at those paths; text that isn't a mount point disables OK. Cancel writes nothing.
+- **Paths** (`pack::new_container_full`): `Auto` = `../../../` + TC path, mount point = the files'
+  common folder (UE's rule). A mount point M: M + TC path, unless the TC path already starts with
+  M's folders (M without `../../../`, whole folders, case ignored) — then `../../../` + TC path.
+  If both readings exist, the one the game has wins, else the full-path one. So a file dropped
+  alone and the same file with its folders give byte-identical containers. Text only: no
+  knowledge of project or plugin names.
+- Refusals for a new container end with "Mount point for the copied files: …".
+- **Companion `.pak`** (`WriteEmptyPak=1`): an empty pak v11 (347 bytes, own writer; read by repak;
+  every reader accepts it for 4.27–5.8), only when none exists. Off: `WarnPakNeeded=1` warns.
+- Copies of game files into a new container (patch containers) ask nothing beyond the dialog.
 
-### 6b.1 ValidateOnReplace **[decided 2026-11-20]**
+### 8.4 New files (N1b)
+- **Package** (Zen `.uasset`/`.umap` the game doesn't have): chunk id = package id of the name
+  **inside** it. Store entry: imported packages = its own `ImportedPackageNames`, no shader-map
+  hashes, no soft references. On all 18 5.3+ sample games the rebuilt entry equals the cook's.
+- **Bulk file** (`.ubulk`/`.uptnl`/`.m.ubulk`): matched to its package by name (in the copy, else
+  in the game by path); id = package id, index 0, its kind; `.m.ubulk` written memory-mapped.
+  It must come from the same cook as its package (laid out by the package's bulk-data map).
+- **Refused:** new packages in pre-5.3 games; files that aren't Zen packages of this game; a
+  package whose name the game already has elsewhere ("drop it there to replace it"); bulk files
+  without their package.
+- **One question per copy** when new files are added or a mount point must change ("Adding new
+  files to an existing container may lead to unpredictable results." / "This new container gets
+  files the game doesn't have …"): new files, `ValidateOnAdd` findings or moves, mount-point block.
+  No writes nothing.
 
-Packing reuses the game's store entry for every package it replaces or copies from another
-container. The 5.8 loader resolves a package's imports through that entry's imported-package list
-(`AsyncLoading2.cpp`: the import map holds indices into it, copied from the store entry, never
-from the package's own `ImportedPackageNames`), and other packages import this one by public
-export hash. A modded or different package can therefore break loading without any error at pack
-time. Before writing, each such package is compared with the game's version and the entry:
+### 8.5 `ValidateOnReplace=Warn|Fix|Error|Off` (default Warn)
+For every package that reuses a game store entry (replace and copy). A modded package can break
+loading without any error at pack time (§1):
 
 | Check | Versions | Fixable |
 |---|---|---|
-| package name inside the file vs the game's | all | no |
-| imported packages vs the entry (added, removed, order) | 5.3+ (the package names its imports; ids = hashes of the names) | **yes**: the entry gets the new list, shader-map hashes kept |
+| package name inside vs the game's | all | no |
+| imported packages vs the entry (added/removed/order) | 5.3+ | **yes**: entry gets the package's list, shader-map hashes kept |
 | import map points past the entry's list | 5.0–5.2 | no |
-| export count vs the entry | ≤ 5.2 (the entry has export counts) | no |
-| package doesn't parse with the game's entry | ≤ 5.2 (read with the entry) | no |
-| public exports removed, or their class changed; with the game packages importing this one | all (4.27: path hashes) | no |
+| export count vs the entry; doesn't parse with the entry | ≤ 5.2 | no |
+| public exports removed or class changed, with the game packages importing it | all (4.27: path hashes) | no |
 
-4.27 import maps hold path hashes, not indices: which package a new import belongs to isn't in the
-file, so added imports can't be detected there. Shader maps and bulk data aren't checked (not in
-the package).
+4.27 import maps hold path hashes, so added imports can't be detected. Shader maps and bulk data
+aren't checked. Warn = Yes/No list (`[fixable]` marks); Fix = correct, pack, then a report
+(`[fixed]`/`[not fixable]`); Error = refuse the copy; Off = no checks. No false positives on
+unmodified games (ARK 168,260, The Isle 36,574, G1R 842 packages, all samples).
 
-`[Pack] ValidateOnReplace=Warn|Fix|Error|Off` (default **Warn**; Configure dialog: "Validation"):
-- **Warn**: one Yes/No question listing the findings (`[fixable]` marks what Fix would correct);
-  No cancels the whole copy, Yes packs unchanged.
-- **Fix**: fixable issues are corrected in the store entry, everything is packed, then one message
-  lists each issue as `[fixed]` or `[not fixable]` (warning icon when anything couldn't be fixed).
-- **Error**: the whole copy is refused with the list; nothing is written.
-- **Off**: no checks (the user's responsibility).
+### 8.6 `ValidateOnAdd=Warn|Fix|Error|Off` (default Warn)
+For new packages:
+- **Path vs name inside:** `<X>/Content/…` → `/Game/…`, `Engine/Content/…` → `/Engine/…`,
+  `…/Plugins/…/<P>/Content/…` → `/<P>/…`. A mismatch loads (by name) but breaks discovery by
+  path. Fix moves the file and its bulk files to the path the name gives.
+- **Materials** (main export `Material`/`MaterialInstanceConstant`): packed without shader maps
+  (no shader library is packed), reported, not fixable.
+- Warn = findings in the question; Fix = moves listed in the question; Error = refuse; Off = none.
 
-Tests: every package of an unmodified game compared with itself finds nothing (ARK 168,260 and The
-Isle 36,574 packages, G1R, all samples, `VALIDATE_SELF`); each mode on every sample game with one
-package's bytes under another's name (`validate_on_replace_modes`). TC (2026-11-20): Warn prompt
-(No → nothing written, TC's "User abort!" after it), Fix report, dialog row.
+### 8.7 Compression and writer
+Compression `Match` = the container's own method; for a new container the method most used by the
+game's containers (None if uncompressed). Override: None/Zlib/Gzip (level 0–9)/LZ4/Oodle
+(compressor + level). Zstd isn't offered (UE writes no Zstd containers; the 5.8 "Zstd" sample is
+Zlib). A block is stored uncompressed when compression doesn't make it smaller. Chunk hashes,
+perfect hash (v4+), directory index, partitions, meta flags as UE.
 
-## 6c. New files (N1b) **[done 2026-11-20]**
+### 8.8 Configure dialog (`ConfigurePacker`, also Alt+F5 → Configure)
+On add, Compression, Zlib/Gzip level, Oodle compressor + level (greyed when unused), On replace;
+"Changing a container": Rebuild after every change, Rebuild containers smaller than (K/M/G);
+"New container": empty `.pak`, Warn that a `.pak` is needed (only without the `.pak`), Ask for the
+mount point, Remember N mount points. File locations at the bottom. Bad input → error line, dialog
+stays open. OK writes `[Pack]` keeping comments in their column. `[Options]` are ini-only.
 
-Decided with the user 2026-11-20 (UnrealReZen copies the game's store entries and supports no new
-packages; this goes further).
+---
 
-**What a new file gets**
-- **Package** (`.uasset`/`.umap`, Zen, not in the game): chunk id = the package id of the name
-  **inside** the package (the loader looks packages up by name: `FPackageId::FromName` in
-  `AsyncLoading2.cpp`, `FilePackageStore` by id only; the directory-index path plays no part in
-  loading). Store entry: imported packages = the package's own `ImportedPackageNames` (cooked 5.3+
-  packages always carry them), no shader-map hashes, no soft references; a file copied from another
-  container keeps that container's entry (as before). Tests: on 18 sample games (5.3–5.8, G1R) the
-  rebuilt entry equals the cook's.
-- **Bulk file** (`.ubulk` / `.uptnl` / `.m.ubulk`): pure payload laid out by its package's
-  bulk-data map, so it must come from the same cook. Chunk id = the package's id, index 0, kind
-  BulkData / OptionalBulkData / MemoryMappedBulkData (checked on the samples and ARK); `.m.ubulk`
-  is written memory-mapped (16 KiB aligned). No store entry.
-- **Path:** where the file was dropped (TC's archive path through the mount point, as for
-  replaces).
-- **Mount point:** when copied or new files fall outside it, it becomes the deepest common folder
-  of the old one and all files, only the index is rewritten (tcl-uepak §4.2.1), and the question
-  below shows it with an example (first existing entry before/after, where the game finds it,
-  where the added files go).
+## 9. Source stream (N7)
+On extraction an NTFS stream `<file>:uetoc.source` (format `uetoc-source 1`: legacy flag,
+container, paks folder, entry, chunk, TOC hash, engine/engine range for `$legacy`) lets
+tcl-uassetvw resolve names without asking. `[Options] SourceStream=View` (default: packages TC
+extracts to view — `%TEMP%\_tc*\` — or drags out — `%TEMP%\CMD*.tmp`), `All` (every extracted file,
+any operation), `Off`. Written only on volumes reporting `FILE_NAMED_STREAMS` (Wine's C: doesn't,
+and would create a stray file), at most 4 KiB, main file times restored. TC's text search
+(`WCS*.tmp`) is ignored. Spec and as-built: [`proposals/N7-source-stream.md`](proposals/N7-source-stream.md).
 
-**Hard refusals** (whole copy, one message; no option): new packages in a pre-5.3 game (the
-package doesn't name its imports), files that aren't Zen packages of this game, a package whose
-name the game already has elsewhere ("drop it there to replace it"), bulk data whose package is
-neither in the game nor in the same copy, other new chunk files (shader libraries …).
+## 10. AES keys
+`uetoc.keys.json` in the settings folder, same format, lookup order (folder/parent → same non-zero
+GUID → dialog), dialog with "session only" and changed-key wording as uepak §3.4. A key is accepted
+when the decrypted directory index parses cleanly; data-only cases: the first block decides. A
+cancelled prompt covers the folder + GUID for 10 s (Find Files asks once per folder).
 
-**One question per copy** (TC calls `PackFiles` once per F5/Alt+F5, so it resets with every
-copy): whenever a copy adds new files — existing container: "Adding new files to an existing
-container may lead to unpredictable results."; new container: "This new container gets files the
-game doesn't have …" — and whenever the mount point has to change. It lists the new files, the
-ValidateOnAdd findings (Warn) or moves (Fix) and the mount-point block; No writes nothing. Copies of
-game files into a new container (the N1 patch-container case) ask nothing.
+## 11. Oodle
+`deps\oo2core_N_win64.dll` next to the plugin, any N, highest wins, picked up without restarting
+TC (uepak's rules and code). Missing → one warning naming `deps\`.
 
-**`[Pack] ValidateOnAdd=Warn|Fix|Error|Off`** (default Warn; Configure dialog "On add"):
-- path vs the package name inside: `<X>/Content/…` → `/Game/…`, `Engine/Content/…` → `/Engine/…`,
-  `…/Plugins/…/<P>/Content/…` → `/<P>/…`. A mismatch loads (by name) but breaks discovery by path
-  (mod loaders scanning a folder, tools). Fix moves the file — and its bulk files — to the path the
-  name gives (the drop's content folder when the root matches, else a game folder with that root);
-  `[fixable]` marks it under Warn.
-- materials (main export class `Material` / `MaterialInstanceConstant`): no shader maps can be
-  built (its shader library isn't packed), reported, not fixable.
-- Warn: findings in the question; Fix: moved files listed in the question (no report afterwards,
-  the question already showed them); Error: whole copy refused; Off: no checks.
-
-**Tests** (`pack_tests.rs`): `new_package_is_added_with_a_derived_entry` (every sample game: a
-package deleted from a copy and packed back: same chunk id, data, path, imports = the cook's; No →
-nothing written; pre-5.3 → refused), `validate_on_add_modes` (one folder too deep, each mode),
-`new_files_mount_point_and_new_container` (package from a container with another mount point:
-question with the mount block, existing files keep their game paths; new container with a new
-file asks), `bulk_files_follow_their_package` (synthetic `.ubulk`/`.m.ubulk`: ids, memory-mapped
-flag, refusal alone). No 5.3+ sample has real bulk files.
-
-## 7. AES keys **[decided]**: own file
-`uetoc.keys.json` in the settings directory, same format, lookup order (folder/parent folder →
-same non-zero GUID → dialog), dialog, "session only" checkbox and changed-key wording as uepak
-§3.4. Wrong-key detection: IoStore stores no hash of the decrypted index, so a key is accepted
-when the decrypted directory index parses cleanly (sane mount-point string, string table and
-entry indexes in range) **[proposed]**; for data-only cases the first block's decode decides.
-
-## 8. Oodle **[decided]**: own `deps\` only
-`deps\oo2core_N_win64.dll` in the plugin folder, any N, highest wins, picked up without
-restarting TC: the same rules and code as uepak (Civ01/repak `oodle_loader`).
-
-## 9. Configuration: `uetoc.ini`
-Location as uepak (plugin dir if writable, else the `wincmd.ini` folder).
+## 12. Configuration: `uetoc.ini`
+Plugin folder if writable, else the `wincmd.ini` folder. The shipped file documents each key.
 ```ini
 [Options]
-OpenUtocAsVirtualFile=1     ; .utoc shows <ContainerId>.txt; 0 = open like the .ucas
-GlobalParentLookupLimit=5   ; parent levels searched for global.utoc (Paks boundary always applies)
-MountPoint=Folder           ; Folder | Root
+OpenUtocAsVirtualFile=1      ; .utoc shows <ContainerId>.txt; 0 = open like the .ucas
+GlobalParentLookupLimit=5    ; parent folders searched for global.utoc (never above Paks)
+MountPoint=Folder            ; Folder | Root
 MountFolderAttr=Hidden
-VirtualFolderAttr=Hidden    ; attribute of $chunks and $legacy
-LegacyEngineVersion=Auto    ; Auto | UE4_27 | UE5_0 … UE5_8 (§6a)
-LegacyGuessScriptTypes=0    ; 1 = ScriptStruct/Enum by name for top-level script imports (§6a.2)
-SourceStream=View           ; View (packages viewed or dragged out) | All (every extracted file) | Off (N7)
-[Pack] (N1, §6b)
-ValidateOnAdd=Warn          ; Warn | Fix | Error | Off (§6c)
-Compression=Match           ; Match | None | Zlib | Gzip | LZ4 | Oodle
-ZlibLevel=6 / OodleCompressor=Kraken / OodleLevel=Normal
-WriteEmptyPak=1             ; new containers: write an empty companion .pak
-WarnPakNeeded=1             ; when WriteEmptyPak=0: warn that a .pak is needed
-Compact=0 / AutoCompactUnder=10M
-AskMountPoint=1             ; new container: ask for its mount point (§6b.2)
-MountPointHistory=10 / RecentMountPoints=   ; remembered mount points (written by the plugin)
-ValidateOnReplace=Warn      ; Warn | Fix | Error | Off (§6b.1)
-DebugLog=0
+VirtualFolderAttr=Hidden     ; $chunks and $legacy
+LegacyEngineVersion=Auto     ; Auto | UE4_27 | UE5_0 … UE5_8 (§7.1)
+LegacyGuessScriptTypes=0     ; 1 = ScriptStruct/Enum by name (§7.3)
+SourceStream=View            ; View | All | Off (§9)
+DebugLog=0                   ; uetoc.log (or in memory, copied on errors)
+
+[Pack]
+ValidateOnAdd=Warn           ; Warn | Fix | Error | Off (§8.6)
+Compression=Match            ; Match | None | Zlib | Gzip | LZ4 | Oodle
+ZlibLevel=6
+OodleCompressor=Kraken       ; Kraken | Mermaid | Selkie | Leviathan
+OodleLevel=Normal            ; SuperFast … Optimal5
+WriteEmptyPak=1
+WarnPakNeeded=1
+Compact=0
+AutoCompactUnder=10M
+AskMountPoint=1              ; §8.3
+MountPointHistory=10
+RecentMountPoints=           ; written by the plugin
+ValidateOnReplace=Warn       ; Warn | Fix | Error | Off (§8.5)
 ```
-`ConfigurePacker` opens the packing settings dialog (§6b); `[Options]` stay ini-only.
+Removed keys are ignored when read: `PackMode` (N1b), `NewMountPoint` (a non-Auto value becomes the
+oldest remembered mount point; the line stays in old ini files and can be deleted).
 
-## 10. Diagnostics and robustness
-Taken from uepak: panic guard on every export, `DebugLog=1` → `uetoc.log` or in-memory log +
-clipboard on error, background unpack (`GetBackgroundFlags = UNPACK`) with per-handle state,
-one key dialog at a time, popups without an owner in background threads.
+## 13. Diagnostics and robustness
+From uepak: panic guard on every export, `DebugLog=1` → `uetoc.log` or in-memory log copied to the
+clipboard on errors, background unpack/pack with per-handle state, one key dialog at a time,
+owner-less popups in background threads. TC needs the ANSI `PackFiles`/`DeleteFiles` exports even
+with the W ones (else "Error packing files!" and no call). Caps 223 + `BACKGROUND_PACK`. A refusal
+returns `E_EABORTED`, so TC adds "User abort!" after the plugin's message (as uepak).
 
-## 11. Fork changes (`Civ01/retoc`, branch `tcl-iostore`; `master` untouched) **[decided]**
-All in the new `iostore` crate (§2.1) **[done]**:
-1. Reader: every partition (`name_sN.ucas`; a missing one fails only when read), positional
-   reads (thread-safe), `ChunkReader::next_piece` (one decoded block per call) and `Read`;
-   header/entry-size/partition/block checks instead of asserts; typed errors (`thiserror`).
-2. Dependencies: only the container layer (no clap/rayon/indicatif/jmap/tracing/serde).
-3. Compression: Zlib, Gzip, LZ4, Zstd, Oodle (`oodle_loader` from Civ01/repak, no download).
-4. Hash checks (SHA-1 for TOC ≤ 3, BLAKE3-160 for ≥ 4), `ContainerId`, `Guid` (displayed as
-   the 16 bytes in file order, as tcl-uepak), chunk-type names for both numberings.
-5. `GameProfile` trait (magic, TOC preparation, decryption, compression names) + `Vanilla`.
-6. No panics on unexpected input: fuzz-style tests truncate and corrupt a TOC byte by byte
-   (they found a 66 GB allocation from a corrupted partition count, fixed).
-7. Tests: synthetic containers (all methods, versions 3/5/6/8, encryption, partitions,
-   damage) and every chunk of the sample containers (`IOSTORE_SAMPLES`, `IOSTORE_OODLE`).
-8. For the legacy view (N3), in the `retoc` crate: `ChunkDataSource` +
-   `IoStoreContainer::open_with_source` (retoc parses the TOC, data comes from `iostore`),
-   `backend_from_containers`, `build_legacy_without_bulk_data`, `FGuid::from_bytes`, a `Gzip`
-   compression method (TOCs naming it failed to parse in retoc), workspace `oodle_loader`/`repak`
-   from Civ01/repak without download (`retoc_cli` turns download back on). retoc's own
-   `test_zen_asset_identity_conversion` fails on `master` too (test files missing).
-9. UE 5.8 and legacy fixes in the `retoc` crate: 8-byte shader hashes (7346193), cooked import
-   `PackageName` (195bf45), script import classes + `bIsAsset` (66f361d), PackageSource +
-   SavedHash + script serialization offsets (0717d17), §6a.1/§6a.2.
-   Measured: ~1 GB/s read + Oodle + hash (warm cache); 81 MB peak while reading a 3.5 GB chunk.
-10. Writer (N1, 3a5f9d3 + e7e9a29) and container-header edits (86693a7), §6b.
+---
 
-## 12. Testing
-- Test containers (project files `IOStore_UEVanilla_test_containers_v3.7z`,
-  `IOStore_GameSpecific_test_containers_v1.7z`, `…_UE50_v2.7z`, kept outside the repo; folder in
-  `IOSTORE_SAMPLES`, Oodle library folder in `IOSTORE_OODLE`, AES keys from `key.txt` next to a
-  container). **[done]** Plugin tests (`cargo test --release`, through open → ReadHeader →
-  ProcessFile): every sample lists every chunk exactly once, every item passes `PK_TEST`,
-  extracted files have the listed size; `.utoc` info view; mount-point views and `$chunks`;
-  global lookup rules (Paks boundary, limit, invalid global, `.ucas` without `.utoc`,
-  partition names); key dialog flow (cancel, wrong key, right key, session cache); a damaged
-  block fails `PK_TEST` but still extracts. Fork tests: see §11.
-- **Trimmed containers** (`tools/ucas_trim.py`, Python 3.9+, stdlib only): big game containers
-  are uploaded with the `.utoc` unchanged and the `.ucas` zeroed except for selected chunks;
-  `<name>.trim.json` lists the chunks that still hold real data. Tests list the whole container
-  and extract/hash-check only the kept chunks.
-- **Oodle**: tests use the real library through the fork's `oodle_loader` search paths:
-  `liboo2corelinux64.so.9` in the sandbox, `oo2core_9_win64.dll` on Windows (both project
-  files, never committed; test path from an env var). The `.so` decoded every Oodle block of
-  the 4.27, G1R and 5.0 samples with matching chunk hashes.
-- Synthetic containers generated in the tests cover what the real sets don't (chunks > 4 GB,
-  odd block sizes); real Oodle compression via the `.so`.
-- Large containers, real data, fetched with anonymous Steam login (DepotDownloader, never
-  uploaded):
-  - **Default:** The Isle Dedicated Server, branch `evrima` (`tools/fetch_isle_server.sh`,
-    ~1 GB): TOC v8, Oodle, encrypted + signed (same key as the TheIsle sample). pakchunk2 has
-    36,575 chunks and a 2 MB directory index, pakchunk1 an 836 MB chunk. Every chunk of
-    pakchunk2 passes its hash check (manifest 3189305585142138513).
-  - **Only for chunks > 2 GB:** ARK: Survival Ascended Dedicated Server
-    (`tools/fetch_ark_server.sh`, ~3.5 GB): pakchunk0 has 162,944 chunks, pakchunk10 a 3.5 GB
-    chunk; all chunks pass (manifest 6268348989345964786).
-- **Performance checks run only when needed** **[decided]**: when code that lists or reads
-  containers changes in a way that could affect speed or memory, not on every change or
-  release. Normal test runs use the small samples.
-- Synthetic containers generated in the tests cover what the real sets don't (chunks > 4 GB,
-  odd block sizes); real Oodle compression via the `.so`.
-- Large containers, real data: ARK: Survival Ascended Dedicated Server (UE 5.x, TOC v8, Oodle),
-  downloaded with anonymous Steam login by `tools/fetch_ark_server.sh` (DepotDownloader,
-  file list `tools/ark_filelist.txt`, ~3.5 GB, never uploaded): `pakchunk0` has 162,944 chunks
-  and an 8.3 MB directory index (listing speed), `pakchunk10` has a 3.5 GB chunk (streaming,
-  memory, progress, Cancel). As of manifest 6268348989345964786 (2026-11-18) every chunk of
-  pakchunk0/10/11 and global passes its hash check. Also: the trimmed 5.0 demo (9157 chunks).
-- Compressed UE5 (`IOStore_UEVanilla58_test_containers_COMPRESSED.7z`): 5.8 with Zlib, Gzip
-  and LZ4 pass. Its `Zstd` folder holds Zlib data (byte-identical to the `zlib` set): UE 5.8's
-  packer seems to fall back to Zlib for Zstd, so no real Zstd sample exists yet (Zstd is covered
-  by the synthetic tests only). Oodle on UE5 is covered by G1R, the 5.0 demo and TheIsle.
-- Backburner: encrypted with a non-zero key GUID; optional segment (`.o.utoc`), partitions
-  (`_sN.ucas`), `.m.ubulk`, localized packages (user will make these with a local UE install).
-- Behaviour in TC (popups, Find Files, view modes) is checked by the user, as for uepak.
-- **TC checks under Wine cover only what the current change touches** **[decided 2026-11-19]**;
-  a full pass over all TC features runs only on request.
+## 14. Testing
+`cargo test --release`, 49 tests. Samples in `IOSTORE_SAMPLES` (a folder of sample sets; sets that
+are shader-only break the read tests), Oodle library folder in `IOSTORE_OODLE`, keys from `key.txt`
+next to a container. Without samples the sample tests skip (CI). Windows CI checks real NTFS
+streams.
+- **Reading:** every sample lists every chunk once, passes `PK_TEST`, extracts at the listed size;
+  info view; mount-point views; `$chunks`; global lookup rules; key dialog flow; damaged block.
+- **`$legacy`:** byte comparison with retoc's CLI output (`RETOC_LEGACY_REF`), engine-version prompt
+  (`IOSTORE_UNVERSIONED_56`).
+- **Packing:** replace every file with itself; copy from another container + new container (repak
+  reads the pak); refusals leave the container untouched; interrupted change restored; empty pak;
+  `ValidateOnReplace` self-check on whole games (`VALIDATE_SELF`) and every mode; new packages on
+  every 5.3+ sample (entry = the cook's), `ValidateOnAdd` modes, mount-point widening, bulk files
+  (synthetic: no 5.3+ sample has bulk); mount-point rule and dialog on 35 sample games; Configure
+  form round trips through the shipped ini.
+- **Samples:** project files `IOStore_UEVanilla_test_containers_v3.7z`, `…58_COMPRESSED.7z`,
+  `…58_SHADERBYTECODE_v2.7z`, `5.8_samples_full_same_asset.7z`, `IOStore_GameSpecific_test_containers_v1.7z`
+  (G1R), `…_UE50_v2.7z` (trimmed with `tools/ucas_trim.py`). Large real containers via anonymous
+  Steam, never uploaded: The Isle server (`tools/fetch_isle_server.sh`, ~1 GB, encrypted + signed)
+  and ARK server (`tools/fetch_ark_server.sh`, ~3.5 GB, a 3.5 GB chunk).
+- Performance is checked only when listing/reading code changes in a way that could matter:
+  ~1 GB/s read + Oodle + hash, 81 MB peak on the 3.5 GB chunk.
+- **TC checks** under Wine (TC 11.58.1 portable, WineHQ 11, Xvfb) cover only what a change touches;
+  a full pass only on request. The user checks on real Windows.
 
-## 12a. Observed TC behaviour (TC 11.58.1 x64 under Wine 11, 2026-11-19)
-Checked in TC itself (portable TC under WineHQ 11.0 + Xvfb in the sandbox; Ubuntu's Wine 9.0
-crashes on start there because `/run/user/<uid>` is missing: `mkdir -p /run/user/$(id -u) && chmod 700`
-on it fixes that, found in tcl-uassetvw):
-- Association: `.ucas` and `.utoc` entries in `[PackerPlugins]` with caps 212; both show
-  archive icons. Listing: mount folders and `$chunks` hidden, sizes > 4 GB shown correctly,
-  `cd` into paths inside a container works.
-- Extract (F5) and TC's Test archives: 5.8 files byte-identical to retoc's unpack; all 843 G1R
-  (Oodle) files match their TOC hashes; Test archives on the encrypted 4.27 set: 31/31 hashes.
-  A 3.5 GB chunk (ARK): progress + Cancel ("User abort!" from TC, partial file deleted), then a
-  full Background extraction while browsing other containers; hash matches.
-- `.utoc` info file in Lister (F3): all sections render.
-- Key dialog: wrong key → error line, right key → listing, "session only" writes no keys file.
-- Oodle DLL removed: one warning naming `deps\`; putting the DLL back works without restarting TC.
-- **TC adds its own "Error in packed file" after any failed OpenArchive**, whatever the code
-  (13, 14, 15, 21, 22, 24 tried); OpenResult 0 with no handle shows an empty archive instead. So
-  the no-global warning (and a cancelled key prompt) is followed by TC's generic message.
-  During Find Files TC adds no message. Keeping both messages **[decided 2026-11-19]**.
-- Find Files over all samples (search inside archives): finds the files in every container. A
-  cancelled key prompt now covers the folder + key GUID for 10 s (was: per container), so one
-  prompt per folder: 3 popups instead of 5 for the sample set (no-global, 4.27, TheIsle).
-- Under Wine the ⚠ in the key dialog's error line shows as a box (font); fine on Windows.
-- Info file in Lister: fixed-width layout lines up (§5); Lister's wrap (key `W`) wraps at about
-  75 characters, so the wide `[Chunks]` rows wrap until wrapping is switched off.
-- `$legacy` (N3 check only, 2026-11-19): hidden folder shown next to `$chunks`; F5 of `$legacy`
-  from the 5.8 sample (versioned): 22 files, identical to retoc, no prompt. The Isle server
-  (unversioned 5.6): the engine-version dialog appears once (combo box with "UE 5.6" /
-  "UE 5.7 / 5.8", newest preselected, *Remember* ticked); picking 5.6 wrote
-  `LegacyEngineVersion=UE5_6` into `uetoc.ini` keeping the line's comment; 110 files identical to
-  retoc; the next copy used the ini value without asking.
+### 14.1 Observed in TC
+- Listing, F5, Test archives, Lister on the info file, key dialog, Oodle warning, 3.5 GB chunk
+  with progress/Cancel/Background, Find Files: as specified.
+- TC adds "Error in packed file" after any failed `OpenArchive` (all codes tried), not during
+  Find Files.
+- F3 extracts to `%TEMP%\_tc\name`, Find Files with text to `%TEMP%\WCSxxxx.tmp`, drag-out to
+  `%TEMP%\CMDxxxx.tmp` (twice per drag, Windows). Ctrl+C in an archive does nothing; right-click
+  Copy is TC's F5 dialog.
+- Alt+F5 target: keep the `ucas:` prefix when editing the name (typing over it picks ZIP).
+- Wine's dialog font draws ⚠ and → as boxes (fine on Windows). Lister wraps at ~75 characters.
+- Packing checked: replace + auto-compact (hashes identical), refusals, new patch container with
+  `.pak`, F8, Configure dialog, ValidateOnReplace prompt/report, N1b question with mount block,
+  mount-point dialog (file alone and with folders give byte-identical containers).
 
-- **N1 packing (2026-11-19, 5.8 zlib sample copied to `C:\game`)**: F5 of 16 extracted files
-  onto `pakchunk11` replaced all 16 and auto-compacted; chunk hashes identical to the original.
-  Alt+F5 with an `.ini` among the files: one refusal message, nothing written. Alt+F5 of
-  `BP_SML.uasset` to a new `zzz_mod_P.ucas`: TOC v8, block 64 KiB, mount
-  `../../../Moadra/Content/Mods/SML/`, 347-byte `zzz_mod_P.pak`; opens in TC with `$chunks`,
-  `$legacy` and the folder. F8 on `$chunks\…ContainerHeader`: refused with our message, then TC's
-  "User abort!" (as uepak, `E_EABORTED`). F8 on `BP_SML.uasset`: "1 removed, rebuilt" (`.ucas`
-  64 bytes).
+---
 
-- **Configure dialog (2026-11-20)**: opened from Alt+F5 → Configure with ucas selected. Shows the
-  ini values; LZ4 greys out both level lists; unticking the `.pak` box enables the warning box;
-  "ten" as size shows the error line and keeps the dialog open; OK with `20M` and
-  `..\..\..\Moadra\Content\Mods` wrote `AutoCompactUnder=20M`,
-  `NewMountPoint=../../../Moadra/Content/Mods/`, comments kept; reopening showed the saved values.
-  A label was cut off under Wine's font at first (widened).
+## 15. Remaining work
 
-- **N7 on real Windows (user, 2026-11-20)**: Ctrl+C in a container does nothing; right-click →
-  Copy opens TC's copy dialog (= F5). Dragging a package out extracts it to
-  `%TEMP%\CMDxxxx.tmp` (seen: `e:\Temp\CMD72B.tmp`, twice per drag), not `_tc`, so the first
-  version wrote no stream there; View now covers `CMD*.tmp` directly in the temp folder.
-- **N7 source stream (2026-11-20)**: F3 on `BP_SML.uasset` inside `pakchunk11`: extracted to
-  `Temp\_tc\BP_SML.uasset`, scope matched, log "volume c:\ named streams: false (flags 0x8a)", no
-  stream and no stray `BP_SML.uasset:uetoc.source` file (Wine would create one without the volume
-  check, proposal §8.1). Real streams are tested on Windows CI (NTFS).
+**N2 — packing legacy cooked files** (next). Legacy `.uasset` + `.uexp` (+ bulk) converted to Zen
+on pack with retoc's `to-zen`, then handed to the N1/N1b paths (replace, copy, new file). Pieces:
+- detect legacy input (package magic, `.uexp` pairing; bulk files follow their package);
+- target engine version from the game, as for `$legacy` (§7.1), prompt when ambiguous;
+- script objects from the global (mandatory already), imports resolved against the game;
+- write the per-version Zen `_Unused` value (§7.2) and the exact 5.8 import layout;
+- store entry from to-zen (imports and, with shader libraries, shader-map hashes) — compared with
+  the game's entry by `ValidateOnReplace` for replacements;
+- optional: legacy shader libraries (`.ushaderbytecode`) → IoStore libraries, which would give new
+  materials their shader maps; needs 5.8 shader-group ids (xxHash128 over 8-byte hashes);
+- tests: round trip `$legacy` → pack → game-identical chunks on every sample, the engine's own
+  legacy cook (SHADERBYTECODE and 5.8 SML samples) as input.
 
-- **N1b (2026-11-20)**: F8 `BP_Monitor` from `pakchunk11` (the game no longer has it), then F5
-  of `C:\src\Moadra` (BP_SML + 14 other game files + BP_Monitor) onto `pakchunk2` (mount
-  `…/Mods/DebugInfo/`): one question with "New files (1)", the mount block (→ `…/Content/Mods/`,
-  example `Components/Tests/BPC_Player_Test.uasset → DebugInfo/…`), Yes → 15 copies + 1 new,
-  `Mods\DebugInfo` and `Mods\SML` listed. Wine's dialog font shows "→" as a box (Windows fonts
-  have it). Configure: "On add" / "On replace" rows.
-- **Mount point dialog (2026-11-23)**: the user's case: `C:\n\BP_SML.uasset` alone, Alt+F5 →
-  `Paks\SML_P.ucas`: dialog preset `../../../Moadra/Content/Mods/SML/` (suggested), preview
-  "The game has 1 of 1"; typing `C:/x` disables OK, `../../../Nowhere` shows 0 of 1; packed
-  (1 copied + `.pak`), remembered in the ini. Then `C:\n2\Moadra\Content\Mods\SML\BP_SML.uasset`
-  (folder `Moadra` selected): preset the remembered one, same preview; `.utoc`/`.ucas`/`.pak`
-  byte-identical to the first. Configure: "Ask for the mount point" + "Remember 10".
-
-## 13. Open items
-- Short check on real Windows (§12a was done under Wine): dialog layout/fonts, install from
-  the CI package and `.utoc` association by hand (pluginst.inf names only `.ucas`).
-- Block signature rule (TheIsle `Signed`).
-- On-demand containers: how they look on disk, if any sample turns up.
+**Other**
+- N4 custom game profiles (CUE4Parse ports) — needs the user's game samples.
+- N5 TOC v9/v10 — when a released engine writes them.
+- N6 tcl-uepak follow-ups: Find Files key-prompt grace; the 5.8 sample `.pak` labels gzip streams
+  as Zlib (repak left them compressed).
+- Real Windows checks: dialog layout and fonts, install from the CI package and the `.utoc`
+  association (pluginst.inf names only `.ucas`), `dir /r` on a dragged-out package (§9).
+- Block signature rule (The Isle `Signed`); on-demand containers if a sample turns up.
+- Sample gaps: real bulk data in a 5.3+ sample, encrypted with a non-zero key GUID, optional
+  segment, multiple partitions, localized packages, a real Zstd container.

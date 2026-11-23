@@ -393,7 +393,7 @@ fn legacy_view_converts_samples() {
     assert_eq!(differ, 0);
 }
 
-/// Engine-version prompt rules (SPEC §6a) on an unversioned UE 5.6 container
+/// Engine-version prompt rules (SPEC §7) on an unversioned UE 5.6 container
 /// (`IOSTORE_UNVERSIONED_56` = its `.utoc`, e.g. The Isle server's pakchunk2; key in key.txt).
 #[test]
 fn legacy_version_prompt() {

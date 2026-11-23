@@ -1,4 +1,4 @@
-//! Which game profile reads a container (SPEC §2.2).
+//! Which game profile reads a container (SPEC §2.3).
 //!
 //! Phase 1 always uses the vanilla profile. Custom-game support (from CUE4Parse) will
 //! choose a profile per folder (stored like AES keys, `uetoc.profiles.json`) and offer a

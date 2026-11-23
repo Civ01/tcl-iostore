@@ -1,4 +1,4 @@
-//! N1b (SPEC §6c): packing files the game doesn't have.
+//! N1b (SPEC §8.4): packing files the game doesn't have.
 //!
 //! - A new package's chunk id is its **internal** package name's id (the loader looks packages
 //!   up by name), its store entry is built from its own `ImportedPackageNames` (UE 5.3+ only;

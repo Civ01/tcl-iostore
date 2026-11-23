@@ -2,7 +2,7 @@
 //!
 //! TC calls `SetProcessDataProc` on the thread that then runs the operation,
 //! so the callback is stored per thread: concurrent operations (background
-//! mode, SPEC §8.1) each report to their own progress dialog.
+//! mode, SPEC §13) each report to their own progress dialog.
 
 use crate::ffi::ProcessDataProcW;
 use std::cell::Cell;

@@ -1,4 +1,4 @@
-//! The packing part of the Configure dialog (SPEC §6b): `[Pack]` options as dialog choices and
+//! The packing part of the Configure dialog (SPEC §8): `[Pack]` options as dialog choices and
 //! back, with validation, and the ini lines written on OK. The Win32 dialog itself is in
 //! `dialog.rs`; everything here is plain data so it is unit-tested.
 

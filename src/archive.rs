@@ -170,7 +170,7 @@ impl Archive {
                 });
             }
         }
-        // legacy view (SPEC §6a)
+        // legacy view (SPEC §7)
         let planned = crate::legacy::plan(c, &safe_files);
         if !planned.is_empty() {
             use crate::legacy::{Planned, LEGACY_DIR};

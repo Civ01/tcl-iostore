@@ -1,4 +1,4 @@
-//! Containers being written right now (SPEC §6b, as tcl-uepak). With background operations TC
+//! Containers being written right now (SPEC §8, as tcl-uepak). With background operations TC
 //! can run several `PackFiles`/`DeleteFiles`/`OpenArchive` calls at once, on
 //! different threads. Two writers on the same container would corrupt it, and
 //! opening one mid-write would see its undo file (wrongly

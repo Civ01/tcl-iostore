@@ -1,6 +1,6 @@
 //! AES keys: parsing, remembered keys (`uetoc.keys.json`) and lookup order.
 //!
-//! Lookup (SPEC §7, same rules as tcl-uepak): a key remembered for the container's
+//! Lookup (SPEC §10, same rules as tcl-uepak): a key remembered for the container's
 //! folder or any parent folder (deepest first) with its key GUID; then, for a non-zero
 //! GUID, any remembered key with that GUID. Keys also live in a session
 //! cache so a key entered without "remember" isn't asked for again while

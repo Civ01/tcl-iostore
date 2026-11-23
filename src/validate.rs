@@ -1,4 +1,4 @@
-//! `ValidateOnReplace` (SPEC §6b.1): checks a package that takes the place of one the game
+//! `ValidateOnReplace` (SPEC §8.5): checks a package that takes the place of one the game
 //! already has (N1 replace, or a game file copied into another container) against the game's
 //! version and its store entry, which packing reuses.
 //!

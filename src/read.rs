@@ -101,7 +101,7 @@ pub(crate) fn warn_oodle_once(container: &Path, detail: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// AES keys (same lookup and dialog as tcl-uepak, SPEC §7)
+// AES keys (same lookup and dialog as tcl-uepak, SPEC §10)
 
 static KEY_PROMPT: Mutex<()> = Mutex::new(());
 /// Cancelled key prompts by (folder, key GUID): TC opens a container several times per
@@ -629,7 +629,7 @@ fn write_bytes(dest: Option<&Path>, display: &str, bytes: &[u8]) -> c_int {
     }
 }
 
-/// Extract/test of a `$legacy` file (SPEC §6a).
+/// Extract/test of a `$legacy` file (SPEC §7).
 fn process_legacy(arc: &mut Archive, op: c_int, dest: Option<PathBuf>, display: &str, kind: crate::legacy::LegacyKind) -> c_int {
     use crate::legacy::{LegacyError, LegacyKind, Session};
     if arc.legacy_declined {

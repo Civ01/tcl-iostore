@@ -38,7 +38,7 @@ pub struct SourceInfo {
 }
 
 impl SourceInfo {
-    /// The stream's content (§2.3): format tag, then `key=value` lines, LF.
+    /// The stream's content (N7 proposal §2.3): format tag, then `key=value` lines, LF.
     pub fn render(&self) -> String {
         let mut s = format!("{FORMAT_TAG}\n");
         let mut kv = |k: &str, v: &str| {
