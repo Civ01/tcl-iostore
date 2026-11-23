@@ -343,8 +343,36 @@ fn archive_game_key(archive_path: &str, mode: MountPointMode, target_mount: Opti
     }
 }
 
-/// Classifies every input. `target` is the open edit (`None` for a new container).
-pub fn plan(inputs: &[Input], game: &Game, utoc: &Path, target: Option<&ContainerEdit>, mode: MountPointMode) -> (Vec<Step>, Refusals, Vec<crate::add::Candidate>) {
+/// Game key of a full path (`../../../A/B.uasset` -> `a/b.uasset`).
+fn full_key(full: &str) -> String {
+    crate::add::visible(full).to_lowercase()
+}
+
+/// Where a file copied into a new container at `rel` (`/`-separated) goes (SPEC §6b.2):
+/// - mount point `None` (Auto): `../../../` + rel, the container's mount point follows the files;
+/// - otherwise mount point + rel, unless rel already starts with the mount point's folders
+///   (`Moadra/Content/Mods/SML/…` for `../../../Moadra/Content/Mods/SML/`): then rel is the full
+///   path. When both readings are possible, the one the game has wins (`in_game` takes a full
+///   path), else the full-path reading.
+///
+/// Every result is under the mount point, so the mount point check can't fail.
+pub fn new_container_full(rel: &str, mount: Option<&str>, in_game: impl Fn(&str) -> bool) -> String {
+    let as_full = format!("../../../{rel}");
+    let Some(m) = mount else { return as_full };
+    let prefixed = format!("{m}{rel}");
+    let tail = match strip_prefix_ignore_case(m, "../../../") {
+        Some(t) if !t.is_empty() => t,
+        _ => return prefixed,
+    };
+    if strip_prefix_ignore_case(rel, tail).is_none() {
+        return prefixed;
+    }
+    if in_game(&prefixed) && !in_game(&as_full) { prefixed } else { as_full }
+}
+
+/// Classifies every input. `target` is the open edit (`None` for a new container, whose paths
+/// come from `new_mount` via [`new_container_full`]).
+pub fn plan(inputs: &[Input], game: &Game, utoc: &Path, target: Option<&ContainerEdit>, mode: MountPointMode, new_mount: Option<&str>) -> (Vec<Step>, Refusals, Vec<crate::add::Candidate>) {
     let mut steps = Vec::new();
     let mut r = Refusals::default();
     let mut new = Vec::new();
@@ -386,7 +414,11 @@ pub fn plan(inputs: &[Input], game: &Game, utoc: &Path, target: Option<&Containe
             }
             continue;
         }
-        let key = archive_game_key(&shown, mode, target_mount);
+        let new_full = target.is_none().then(|| new_container_full(&shown.replace('\\', "/"), new_mount, |f| game.by_path.contains_key(&full_key(f))));
+        let key = match &new_full {
+            Some(f) => full_key(f),
+            None => archive_game_key(&shown, mode, target_mount),
+        };
         let lower = key.to_ascii_lowercase();
         if (lower.ends_with(".uasset") || lower.ends_with(".umap") || lower.ends_with(".uexp")) && (lower.ends_with(".uexp") || is_legacy_package(&input.src)) {
             r.legacy.push(shown);
@@ -399,10 +431,11 @@ pub fn plan(inputs: &[Input], game: &Game, utoc: &Path, target: Option<&Containe
         } else if matches!(crate::add::ext_of(&key).as_str(), "uasset" | "umap" | "ubulk" | "uptnl" | "m.ubulk") {
             // not in the game: a new file (N1b, SPEC §6c)
             let rel = shown.replace('\\', "/");
-            let full = match (mode, target_mount) {
-                (MountPointMode::Root, Some(m)) => format!("{m}{rel}"),
-                (_, Some(m)) => format!("{}{rel}", crate::view::Mount::parse(m).base),
-                (_, None) => format!("../../../{rel}"),
+            let full = match (mode, target_mount, new_full) {
+                (_, _, Some(f)) => f,
+                (MountPointMode::Root, Some(m), None) => format!("{m}{rel}"),
+                (_, Some(m), None) => format!("{}{rel}", crate::view::Mount::parse(m).base),
+                (_, None, None) => format!("../../../{rel}"),
             };
             new.push(crate::add::Candidate { input: input.clone(), full });
         } else if is_iostore_type(&key) {
@@ -496,6 +529,7 @@ fn is_package(id: &ChunkId, version: TocVersion) -> bool {
 // ---------------------------------------------------------------------------
 // Running an edit
 
+#[derive(Debug)]
 pub struct Stats {
     pub replaced: usize,
     pub added: usize,
@@ -949,7 +983,7 @@ pub fn pack_files(packed: &Path, sub_path: Option<&str>, src_path: &Path, items:
     let input_bytes: u64 = inputs.iter().map(|i| i.len).sum();
     if exists {
         let (edit, header) = open_edit(&utoc)?;
-        let (mut steps, refusals, cands) = plan(&inputs, &game, &utoc, Some(&edit), options.mount_point);
+        let (mut steps, refusals, cands) = plan(&inputs, &game, &utoc, Some(&edit), options.mount_point, None);
         if !refusals.is_empty() {
             return Err(PackError::User(refusals.message(&game.unreadable)));
         }
@@ -986,13 +1020,19 @@ pub fn pack_files(packed: &Path, sub_path: Option<&str>, src_path: &Path, items:
         let compacted = maybe_compact(&utoc, opts)?;
         Ok(Stats { replaced, added, removed, input_bytes, compacted, new_container: false, pak_written: None })
     } else {
-        let (mut steps, refusals, cands) = plan(&inputs, &game, &utoc, None, options.mount_point);
-        if !refusals.is_empty() {
-            return Err(PackError::User(refusals.message(&game.unreadable)));
-        }
         let global_toc = game.containers.iter().find(|c| c.is_global).map(|c| c.version).unwrap_or(TocVersion(8));
+        let mount = choose_new_mount(&utoc, &inputs, &game, global_toc, opts)?;
+        dlog!("  new container mount point: {}", mount.as_deref().unwrap_or("Auto"));
+        let hint = |e: PackError| match e {
+            PackError::User(m) => PackError::User(format!("{m}\n\nMount point for the copied files: {}", mount.as_deref().unwrap_or("Auto (the common folder of the files)"))),
+            e => e,
+        };
+        let (mut steps, refusals, cands) = plan(&inputs, &game, &utoc, None, options.mount_point, mount.as_deref());
+        if !refusals.is_empty() {
+            return Err(hint(PackError::User(refusals.message(&game.unreadable))));
+        }
         let new_plan = plan_new_files(&cands, &game, global_toc, None, opts.validate_on_add);
-        check_new_files(&new_plan, opts.validate_on_add)?;
+        check_new_files(&new_plan, opts.validate_on_add).map_err(hint)?;
         steps.extend(new_plan.steps.iter().cloned());
         let validation = if opts.validate_on_replace == ValidateOnReplace::Off {
             Validation::default()
@@ -1001,7 +1041,7 @@ pub fn pack_files(packed: &Path, sub_path: Option<&str>, src_path: &Path, items:
         };
         decide_validation(opts.validate_on_replace, &validation)?;
         ask_additions(&utoc, &steps, &new_plan, opts.validate_on_add, false, None)?;
-        let settings = new_container_settings(&utoc, &game, &steps, opts)?;
+        let settings = new_container_settings(&utoc, &game, &steps, mount.as_deref())?;
         let compressor = choose_compressor(opts, None, &game)?;
         let header = new_container_header(&game, &settings)?;
         dlog!("  new container: TOC {} block {} mount {:?} id {} compression {compressor:?}", settings.version.0, settings.block_size, settings.mount_point, settings.container_id);
@@ -1101,7 +1141,110 @@ pub fn delete_files(packed: &Path, items: &[String], options: &Options) -> Resul
 // ---------------------------------------------------------------------------
 // New containers
 
-fn new_container_settings(utoc: &Path, game: &Game, steps: &[Step], opts: &PackOptions) -> Result<NewContainer, PackError> {
+/// Mount point folders where the game has the packages dropped here (by the name inside them):
+/// `../../../Moadra/Content/Mods/SML/` for `BP_SML.uasset` dropped alone.
+fn suggested_mounts(inputs: &[Input], game: &Game, toc: TocVersion) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let (Some(toc_enum), Some(hv)) = (retoc::EIoStoreTocVersion::from_repr(toc.0), game_header_version(game)) else { return out };
+    for input in inputs.iter().filter(|i| matches!(crate::add::ext_of(&i.archive_path.to_lowercase()).as_str(), "uasset" | "umap")).take(50) {
+        let first = input.archive_path.split('\\').next().unwrap_or("");
+        if first.eq_ignore_ascii_case(CHUNKS_DIR) || first.eq_ignore_ascii_case(LEGACY_DIR) || is_legacy_package(&input.src) {
+            continue;
+        }
+        let Ok(h) = std::fs::File::open(&input.src).map_err(|e| e.to_string()).and_then(|f| crate::validate::read_header(&mut std::io::BufReader::new(f), None, toc_enum, hv)) else { continue };
+        let Some(chunk) = ChunkId::create(crate::add::package_id(&h.package_name()), 0, ChunkKind::ExportBundleData, toc) else { continue };
+        let Some(at) = game.by_id.get(&chunk).and_then(|fs| fs.iter().find_map(|f| f.full.as_deref())) else { continue };
+        let at = crate::add::visible(at);
+        let rel = input.archive_path.replace('\\', "/");
+        if at.len() < rel.len() || !at[at.len() - rel.len()..].eq_ignore_ascii_case(&rel) {
+            continue;
+        }
+        let folder = &at[..at.len() - rel.len()];
+        // dropped with its whole path: Auto already fits
+        if folder.is_empty() || !folder.ends_with('/') {
+            continue;
+        }
+        let m = format!("../../../{folder}");
+        if !out.iter().any(|o| o.eq_ignore_ascii_case(&m)) {
+            out.push(m);
+        }
+    }
+    out
+}
+
+/// What a mount point text means for the copied files (the dialog's preview line).
+fn mount_preview(text: &str, inputs: &[Input], game: &Game) -> Result<String, String> {
+    let mount = crate::pack_settings::normalize_mount_point(text)?;
+    let in_game = |f: &str| game.by_path.contains_key(&full_key(f));
+    let mut n = 0usize;
+    let mut found = 0usize;
+    let mut first = None;
+    for input in inputs {
+        let top = input.archive_path.split('\\').next().unwrap_or("");
+        if top.eq_ignore_ascii_case(CHUNKS_DIR) || top.eq_ignore_ascii_case(LEGACY_DIR) {
+            continue;
+        }
+        let rel = input.archive_path.replace('\\', "/");
+        let full = new_container_full(&rel, mount.as_deref(), in_game);
+        n += 1;
+        if in_game(&full) {
+            found += 1;
+        }
+        first.get_or_insert((rel, full));
+    }
+    let Some((rel, full)) = first else { return Ok(String::new()) };
+    let more = if n > 1 { format!(" (and {} more)", n - 1) } else { String::new() };
+    let full = if mount.is_none() { format!("{full} (the mount point becomes the files' common folder)") } else { full };
+    Ok(format!("{rel} \u{2192} {full}{more}\nThe game has {found} of {n} at these paths (replaced in this container); the rest are new files."))
+}
+
+/// The mount point for a new container: asked (`AskMountPoint`) with the remembered ones, the
+/// game's folders of the dropped packages and Auto; the answer is remembered first. `None` = Auto.
+fn choose_new_mount(utoc: &Path, inputs: &[Input], game: &Game, toc: TocVersion, opts: &PackOptions) -> Result<Option<String>, PackError> {
+    let mut choices: Vec<String> = opts.recent_mount_points.iter().take(opts.mount_point_history.max(1)).cloned().collect();
+    let suggested = suggested_mounts(inputs, game, toc);
+    for m in suggested.iter().chain(std::iter::once(&"Auto".to_string())) {
+        if !choices.iter().any(|c| c.eq_ignore_ascii_case(m)) {
+            choices.push(m.clone());
+        }
+    }
+    let preset = opts.recent_mount_points.first().or(suggested.first()).cloned().unwrap_or_else(|| "Auto".into());
+    let answer = if opts.ask_mount_point {
+        let preview = |t: &str| mount_preview(t, inputs, game);
+        let p = crate::dialog::MountPrompt { container: utoc, choices: &choices, preset: &preset, preview: &preview };
+        crate::dialog::ask_mount_point(&p).ok_or(PackError::Aborted)?
+    } else {
+        preset
+    };
+    let mount = crate::pack_settings::normalize_mount_point(&answer).map_err(PackError::User)?;
+    remember_mount(opts, mount.as_deref().unwrap_or("Auto"));
+    Ok(mount)
+}
+
+/// Remembered mount points (tests): what would be written to `RecentMountPoints`.
+#[cfg(test)]
+pub static TEST_SAVED_MOUNTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn remember_mount(opts: &PackOptions, used: &str) {
+    if opts.mount_point_history == 0 {
+        return;
+    }
+    let mut list = vec![used.to_string()];
+    list.extend(opts.recent_mount_points.iter().filter(|r| !r.eq_ignore_ascii_case(used)).cloned());
+    list.truncate(opts.mount_point_history);
+    let value = list.join("|");
+    #[cfg(test)]
+    {
+        *TEST_SAVED_MOUNTS.lock().unwrap() = list;
+    }
+    #[cfg(not(test))]
+    if let Err(e) = crate::config::set_values("Pack", &[("RecentMountPoints", value.clone())]) {
+        dlog!("  mount point not remembered: {e}");
+    }
+    dlog!("  RecentMountPoints={value}");
+}
+
+fn new_container_settings(utoc: &Path, game: &Game, steps: &[Step], mount: Option<&str>) -> Result<NewContainer, PackError> {
     let global = game.containers.iter().find(|c| c.is_global).ok_or_else(|| PackError::User("The global container couldn't be read.".into()))?;
     let others: Vec<&GameContainer> = game.containers.iter().filter(|c| !c.is_global).collect();
     let mut sizes: HashMap<u32, usize> = HashMap::new();
@@ -1110,12 +1253,14 @@ fn new_container_settings(utoc: &Path, game: &Game, steps: &[Step], opts: &PackO
     }
     let block_size = sizes.into_iter().max_by_key(|x| (x.1, x.0)).map(|x| x.0).unwrap_or(global.block_size);
     let name = utoc.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let mount_point = match &opts.new_mount_point {
+    let mount_point = match mount {
         Some(m) => {
-            let m = if m.ends_with('/') { m.clone() } else { format!("{m}/") };
+            let m = if m.ends_with('/') { m.to_string() } else { format!("{m}/") };
+            // paths come from the mount point (new_container_full); game files copied by id keep
+            // the game's path, which the lookup matched under the same rule
             for f in steps.iter().filter_map(Step::full) {
                 if strip_prefix_ignore_case(f, &m).is_none() {
-                    return Err(PackError::User(format!("{f} is not under the mount point {m} ([Pack] NewMountPoint).")));
+                    return Err(PackError::User(format!("{f} is not under the mount point {m}.")));
                 }
             }
             m

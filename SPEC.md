@@ -467,8 +467,7 @@ pieces only; a game load test by the user (patch container + empty `.pak`).
   unknown) and new blocks + the directory index are encrypted with it.
 - Signed containers: confirmation, then written unsigned (as decided).
 - New container: TOC version, block size, compression from the game's containers; mount point
-  `NewMountPoint=Auto` = the common folder of the packed files (UE's rule), else the given one
-  (files outside it refused). A replaced/added file outside an existing container's mount point
+  asked for each new container (§6b.2; was `NewMountPoint`). A replaced/added file outside an existing container's mount point
   moves the mount point up to the common folder. Empty v11 `.pak` = 347 bytes, read by repak.
 - Refusals list every file by reason in one message (not in the game; companion-pak files; legacy
   cooked files → N2; read-only: `$legacy`, the global, `ContainerHeader`); nothing is changed.
@@ -483,13 +482,43 @@ pieces only; a game load test by the user (patch container + empty `.pak`).
   dialog): Mode, Compression (Match the game / None / Zlib / Gzip / LZ4 / Oodle), Zlib/Gzip level,
   Oodle compressor + level (level lists greyed when the method doesn't use them; Match keeps
   both), Rebuild after every change, Rebuild containers smaller than (size with K/M/G), Write
-  empty `.pak`, Warn that a `.pak` is needed (only when no `.pak` is written), Mount point (empty =
-  Auto; backslashes and a missing trailing `/` are fixed). File locations at the bottom. Bad
+  empty `.pak`, Warn that a `.pak` is needed (only when no `.pak` is written), Ask for the mount
+  point + how many to remember (§6b.2; the Mount point field until 2026-11-23). File locations at the bottom. Bad
   input shows a line in the dialog, which stays open. OK writes the `[Pack]` lines into the
   settings ini, keeping every comment in its column. Form logic in `pack_settings.rs` (tested).
   Block size and UndoLimit from the plan are not offered (block size comes from the game; one
   undo record).
 - Not yet: ReplaceWithAddition (N1b), legacy input (N2).
+
+### 6b.2 Mount point of a new container **[done 2026-11-23]**
+
+Found by the user: a file dropped alone (`BP_SML.uasset`) with `NewMountPoint=../../../Moadra/
+Content/Mods/SML/` was refused ("the game already has … drop it there"), the same file with its
+folders (`Moadra\Content\Mods\SML\BP_SML.uasset`) packed fine. The setting only became the
+container's mount point; dropped paths were always `../../../` + their path in the copy. Decided
+(user, 2026-11-23): ask for the mount point every time, and both drops give the same result.
+
+- **Dialog** before every new container (`AskMountPoint=1`, default; 0 = the last one, no
+  dialog): editable dropdown with the remembered mount points (`RecentMountPoints`, newest first,
+  `MountPointHistory=10`, 0-50; saved by the plugin on OK, also when the copy is then refused),
+  the game's folder of each dropped package (by the name inside it; `../../../` left out, Auto
+  covers it) and Auto. Preset: the last one, else the first suggestion, else Auto. A preview line
+  shows where the first file goes and how many files the game has at their paths; text that
+  isn't a mount point disables OK. Cancel writes nothing and remembers nothing. Existing
+  containers aren't asked (they have a mount point; changes go through the §6c question).
+- **Paths** (`pack::new_container_full`): Auto = `../../../` + path, the mount point becomes the
+  files' common folder (as before). A mount point M: M + path, unless the path already starts
+  with M's folders (M without `../../../`, whole folders, case ignored): then `../../../` + path.
+  When both readings are possible the one the game has wins, else the full-path reading. Text
+  only, no knowledge of project or plugin names (`Engine`, `Paper2D`, a project called `Game`).
+  Every path ends up under M, so the existing "not under the mount point" check can't fire.
+- Lookup, `ValidateOnReplace`, `ValidateOnAdd`, refusals unchanged; they see the resolved paths.
+  Refusals of a new container end with "Mount point for the copied files: …".
+- Migration: a non-Auto `NewMountPoint` becomes a remembered entry; the key isn't written any
+  more.
+- Tests: `new_container_paths_from_the_mount_point` (rule), `new_container_mount_point_dialog`
+  (35 sample games: file alone with the suggestion, tree with the remembered one, Auto, wrong
+  mount point refused and named, bad text, Cancel, `AskMountPoint=0`, history order and size).
 
 ### 6b.1 ValidateOnReplace **[decided 2026-11-20]**
 
@@ -610,7 +639,9 @@ Compression=Match           ; Match | None | Zlib | Gzip | LZ4 | Oodle
 ZlibLevel=6 / OodleCompressor=Kraken / OodleLevel=Normal
 WriteEmptyPak=1             ; new containers: write an empty companion .pak
 WarnPakNeeded=1             ; when WriteEmptyPak=0: warn that a .pak is needed
-Compact=0 / AutoCompactUnder=10M / NewMountPoint=Auto
+Compact=0 / AutoCompactUnder=10M
+AskMountPoint=1             ; new container: ask for its mount point (§6b.2)
+MountPointHistory=10 / RecentMountPoints=   ; remembered mount points (written by the plugin)
 ValidateOnReplace=Warn      ; Warn | Fix | Error | Off (§6b.1)
 DebugLog=0
 ```
@@ -759,6 +790,12 @@ on it fixes that, found in tcl-uassetvw):
   example `Components/Tests/BPC_Player_Test.uasset → DebugInfo/…`), Yes → 15 copies + 1 new,
   `Mods\DebugInfo` and `Mods\SML` listed. Wine's dialog font shows "→" as a box (Windows fonts
   have it). Configure: "On add" / "On replace" rows.
+- **Mount point dialog (2026-11-23)**: the user's case: `C:\n\BP_SML.uasset` alone, Alt+F5 →
+  `Paks\SML_P.ucas`: dialog preset `../../../Moadra/Content/Mods/SML/` (suggested), preview
+  "The game has 1 of 1"; typing `C:/x` disables OK, `../../../Nowhere` shows 0 of 1; packed
+  (1 copied + `.pak`), remembered in the ini. Then `C:\n2\Moadra\Content\Mods\SML\BP_SML.uasset`
+  (folder `Moadra` selected): preset the remembered one, same preview; `.utoc`/`.ucas`/`.pak`
+  byte-identical to the first. Configure: "Ask for the mount point" + "Remember 10".
 
 ## 13. Open items
 - Short check on real Windows (§12a was done under Wine): dialog layout/fonts, install from

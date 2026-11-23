@@ -741,3 +741,144 @@ fn bulk_files_follow_their_package() {
     // only the package has a store entry
     assert!(entry_of(&after, id).is_some());
 }
+
+fn mount_answers(a: &[Option<&str>]) {
+    crate::dialog::TEST_MOUNT_PROMPTS.lock().unwrap().clear();
+    pack::TEST_SAVED_MOUNTS.lock().unwrap().clear();
+    let mut q = crate::dialog::TEST_MOUNT_ANSWERS.lock().unwrap();
+    q.clear();
+    q.extend(a.iter().map(|x| x.map(String::from)));
+}
+
+fn mount_prompts() -> Vec<(Vec<String>, String, String)> {
+    crate::dialog::TEST_MOUNT_PROMPTS.lock().unwrap().clone()
+}
+
+fn mount_of(utoc: &Path) -> String {
+    Container::open(utoc, Arc::new(Vanilla)).unwrap().directory_index().unwrap().mount_point.clone()
+}
+
+/// SPEC §6b.2 rule B, without a game.
+#[test]
+fn new_container_paths_from_the_mount_point() {
+    let m = Some("../../../Moadra/Content/Mods/SML/");
+    let none = |_: &str| false;
+    // a file alone: mount point + its path
+    assert_eq!(pack::new_container_full("BP_SML.uasset", m, none), "../../../Moadra/Content/Mods/SML/BP_SML.uasset");
+    // the whole tree: already starts with the mount point's folders, taken as it is
+    assert_eq!(pack::new_container_full("Moadra/Content/Mods/SML/BP_SML.uasset", m, none), "../../../Moadra/Content/Mods/SML/BP_SML.uasset");
+    assert_eq!(pack::new_container_full("moadra/content/mods/sml/X.uasset", m, none), "../../../moadra/content/mods/sml/X.uasset");
+    // only a part of the folders: prefixed (and then simply not the game's path)
+    assert_eq!(pack::new_container_full("Mods/SML/BP_SML.uasset", m, none), "../../../Moadra/Content/Mods/SML/Mods/SML/BP_SML.uasset");
+    // a folder that merely starts with the same letters isn't the mount point's folder
+    assert_eq!(pack::new_container_full("Moadra/Content/Mods/SMLX/a.uasset", m, none), "../../../Moadra/Content/Mods/SML/Moadra/Content/Mods/SMLX/a.uasset");
+    // both readings possible: the game decides, else the full-path reading
+    let doubled = "../../../Moadra/Content/Mods/SML/Moadra/Content/Mods/SML/a.uasset";
+    assert_eq!(pack::new_container_full("Moadra/Content/Mods/SML/a.uasset", m, |f| f == doubled), doubled);
+    assert_eq!(pack::new_container_full("Moadra/Content/Mods/SML/a.uasset", m, |_| true), "../../../Moadra/Content/Mods/SML/a.uasset");
+    // Auto and the root mount point
+    assert_eq!(pack::new_container_full("Moadra/a.uasset", None, none), "../../../Moadra/a.uasset");
+    assert_eq!(pack::new_container_full("Moadra/a.uasset", Some("../../../"), none), "../../../Moadra/a.uasset");
+}
+
+/// SPEC §6b.2: a game file dropped alone or with its whole path into a new container, with the
+/// mount point asked (preset = remembered, else the game's folder of the package), Auto, a wrong
+/// mount point (refused, named in the message), Cancel, AskMountPoint=0 and the history.
+#[test]
+fn new_container_mount_point_dialog() {
+    let _l = lock();
+    let mut tested = 0;
+    for g in games() {
+        let Some(t0) = targets(&g).into_iter().find(|t| pick_package(t, false).is_some()) else { continue };
+        let named = snapshot(&t0).header.as_ref().is_some_and(|h| crate::validate::names_imports(h.version));
+        let copy = copy_game(&g, "mountdlg");
+        let utoc = copy.join(t0.file_name().unwrap());
+        let (shown, key, id, _) = pick_package(&utoc, false).unwrap();
+        let Some((folder, base)) = shown.rsplit_once('\\') else { continue };
+        let folder_mount = format!("../../../{}/", folder.replace('\\', "/"));
+        let tree = copy.join("tree");
+        extract_named(&utoc, &tree);
+        let alone = copy.join("alone");
+        std::fs::create_dir_all(&alone).unwrap();
+        std::fs::copy(tree.join(shown.replace('\\', "/")), alone.join(base)).unwrap();
+        let pack_new = |name: &str, src: &Path, item: &str, o: &Options| pack::pack_files(&copy.join(name).with_extension("ucas"), None, src, &[item.to_string()], pack::PK_PACK_SAVE_PATHS, o);
+
+        // 1. alone, nothing remembered: preset = the game's folder of the package (5.3+: the name
+        //    is read; older: no suggestion, preset Auto, which can't place the file -> refused)
+        mount_answers(&[]);
+        confirm_answers(&[]);
+        let r = pack_new("zzz_m1_P", &alone, base, &options(false));
+        let p = mount_prompts();
+        assert_eq!(p.len(), 1, "{g:?}");
+        assert!(p[0].0.iter().any(|c| c == "Auto"));
+        if named {
+            let st = r.unwrap_or_else(|e| panic!("{g:?}: {e:?}"));
+            assert_eq!(p[0].1, folder_mount, "{g:?}");
+            assert!(p[0].2.contains("The game has 1 of 1"), "{}", p[0].2);
+            assert!(st.new_container && st.added == 1, "{st:?}");
+            let sn = snapshot(&copy.join("zzz_m1_P.utoc"));
+            assert_eq!(sn.files.get(&key), Some(&id), "{g:?}");
+            assert_eq!(mount_of(&copy.join("zzz_m1_P.utoc")), folder_mount);
+            assert_eq!(*pack::TEST_SAVED_MOUNTS.lock().unwrap(), [folder_mount.clone()]);
+            assert!(asked().is_empty(), "a game file asks nothing more: {:?}", asked());
+        } else {
+            assert_eq!(p[0].1, "Auto");
+            assert!(r.is_err() && !copy.join("zzz_m1_P.utoc").exists());
+        }
+
+        // 2. the whole tree with the same (remembered) mount point: the same container
+        let mut o = options(false);
+        o.pack.recent_mount_points = vec![folder_mount.clone(), "Auto".into()];
+        mount_answers(&[]);
+        let st = pack_new("zzz_m2_P", &tree, &shown, &o).unwrap_or_else(|e| panic!("{g:?}: {e:?}"));
+        assert!(st.added == 1);
+        let p = mount_prompts();
+        assert_eq!(p[0].1, folder_mount);
+        assert!(p[0].2.contains("The game has 1 of 1"), "{}", p[0].2);
+        assert_eq!(snapshot(&copy.join("zzz_m2_P.utoc")).files.get(&key), Some(&id));
+        assert_eq!(mount_of(&copy.join("zzz_m2_P.utoc")), folder_mount);
+
+        // 3. the tree with Auto picked from the list: the history is reordered
+        mount_answers(&[Some("Auto")]);
+        let st = pack_new("zzz_m3_P", &tree, &shown, &o).unwrap();
+        assert!(st.added == 1);
+        assert_eq!(snapshot(&copy.join("zzz_m3_P.utoc")).files.get(&key), Some(&id));
+        assert_eq!(*pack::TEST_SAVED_MOUNTS.lock().unwrap(), ["Auto".to_string(), folder_mount.clone()]);
+
+        // 4. a mount point the file doesn't belong under: refused, the message names it
+        mount_answers(&[Some(r"..\..\..\Nowhere")]);
+        let e = pack_new("zzz_m4_P", &alone, base, &o).unwrap_err();
+        let PackError::User(msg) = e else { panic!("{e:?}") };
+        assert!(msg.contains("Mount point for the copied files: ../../../Nowhere/"), "{msg}");
+        assert!(!copy.join("zzz_m4_P.utoc").exists());
+
+        // 5. a bad text: the dialog's preview refuses it (OK stays disabled)
+        mount_answers(&[Some("C:/Game"), None]);
+        let (_, _, preview) = {
+            let _ = pack_new("zzz_m5_P", &alone, base, &o);
+            mount_prompts().remove(0)
+        };
+        assert!(preview.starts_with("ERR") && preview.contains("not a mount point"), "{preview}");
+
+        // 6. Cancel: nothing written, nothing remembered
+        mount_answers(&[None]);
+        assert!(matches!(pack_new("zzz_m6_P", &tree, &shown, &o), Err(PackError::Aborted)));
+        assert!(!copy.join("zzz_m6_P.utoc").exists());
+        assert!(pack::TEST_SAVED_MOUNTS.lock().unwrap().is_empty());
+
+        // 7. AskMountPoint=0: the last one, no dialog; history size 1 keeps only it
+        let mut o7 = o.clone();
+        o7.pack.ask_mount_point = false;
+        o7.pack.mount_point_history = 1;
+        mount_answers(&[]);
+        let st = pack_new("zzz_m7_P", &alone, base, &o7);
+        assert!(mount_prompts().is_empty());
+        assert_eq!(*pack::TEST_SAVED_MOUNTS.lock().unwrap(), [folder_mount.clone()]);
+        let st = st.unwrap();
+        assert!(st.added == 1);
+        assert_eq!(snapshot(&copy.join("zzz_m7_P.utoc")).files.get(&key), Some(&id));
+        tested += 1;
+        let _ = std::fs::remove_dir_all(&copy);
+    }
+    eprintln!("mount point dialog: {tested} games");
+}

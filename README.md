@@ -37,7 +37,9 @@ decisions: [SPEC.md](SPEC.md).
   its `.ubulk`/`.uptnl`/`.m.ubulk` files go with it. Adding asks once per copy (and shows how the
   container's mount point changes, if it has to). Refused, with one message for the whole copy:
   `.ini`/`.locres` and other companion-pak files, legacy cooked `.uasset`+`.uexp` (later),
-  new packages in pre-5.3 games, bulk files without their package. A new container takes TOC
+  new packages in pre-5.3 games, bulk files without their package. A new container asks for its
+  mount point (remembered ones, the game's folder of the dropped packages, or Auto); a file
+  dropped alone and the same file with its folders end up at the same path. It takes TOC
   version, block size and compression from the game and gets an empty companion `.pak`
   (`WriteEmptyPak`). Changes are appended with an undo record (restored on the next open after
   a crash); small containers are rebuilt (`AutoCompactUnder`). Settings: the plugin's Configure

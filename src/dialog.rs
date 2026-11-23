@@ -88,6 +88,38 @@ pub fn prompt_version(p: &VersionPrompt) -> Option<VersionAnswer> {
     imp::prompt_version(p)
 }
 
+/// Mount-point question for a new container (SPEC §6b.2).
+pub struct MountPrompt<'a> {
+    pub container: &'a Path,
+    /// Dropdown entries (remembered ones first, then suggestions, then `Auto`).
+    pub choices: &'a [String],
+    pub preset: &'a str,
+    /// What a text means for the copied files; `Err` = not a mount point (OK refused).
+    pub preview: &'a dyn Fn(&str) -> Result<String, String>,
+}
+
+/// Answers for tests: `Some(text)` = OK with that text, `None` = Cancel; empty queue = OK with
+/// the preset.
+#[cfg(test)]
+pub static TEST_MOUNT_ANSWERS: std::sync::Mutex<Vec<Option<String>>> = std::sync::Mutex::new(Vec::new());
+/// (choices, preset, preview of the answer) of each mount prompt (tests).
+#[cfg(test)]
+pub static TEST_MOUNT_PROMPTS: std::sync::Mutex<Vec<(Vec<String>, String, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// The chosen text (not yet normalized), `None` = cancelled.
+pub fn ask_mount_point(p: &MountPrompt) -> Option<String> {
+    #[cfg(test)]
+    {
+        let mut q = TEST_MOUNT_ANSWERS.lock().unwrap();
+        let answer = if q.is_empty() { Some(p.preset.to_string()) } else { q.remove(0) };
+        let preview = answer.as_deref().map(|a| (p.preview)(a).unwrap_or_else(|e| format!("ERR {e}"))).unwrap_or_default();
+        TEST_MOUNT_PROMPTS.lock().unwrap().push((p.choices.to_vec(), p.preset.to_string(), preview));
+        answer
+    }
+    #[cfg(not(test))]
+    imp::ask_mount_point(p)
+}
+
 /// Shows the dialog. `None` = cancelled.
 /// The packing settings dialog (ConfigurePacker). `info` is shown at the bottom (file
 /// locations). Returns the accepted form, already validated by `PackForm::to_options`.
@@ -496,6 +528,7 @@ mod imp {
     const ID_PZLIBLABEL: u16 = 312;
     const ID_POODLELABEL: u16 = 313;
     const ID_PVALID: u16 = 314;
+    const ID_PHISTORY: u16 = 315;
     const CBN_SELCHANGE: u32 = 1;
     const BN_CLICKED: u32 = 0;
 
@@ -614,18 +647,28 @@ mod imp {
             ID_PWARNPAK,
             "&Warn that a .pak is needed when none is written",
         );
-        t.item(STATIC, 0, 14, 184, 64, 9, NONE, "Mount &point:");
+        t.item(
+            BUTTON,
+            BS_AUTOCHECKBOX | WS_TABSTOP,
+            14,
+            181,
+            290,
+            10,
+            ID_PMOUNT,
+            "Ask for the &mount point (else the last one is used)",
+        );
+        t.item(STATIC, 0, 14, 198, 64, 9, NONE, "Re&member:");
         t.item(
             EDIT,
             ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
             80,
-            182,
-            226,
+            196,
+            30,
             13,
-            ID_PMOUNT,
+            ID_PHISTORY,
             "",
         );
-        t.item(STATIC, SS_NOPREFIX, 80, 198, 226, 16, NONE, "Empty: the common folder of the packed files (as UE does).\nExample: ../../../Game/Content/Mods/");
+        t.item(STATIC, 0, 116, 198, 190, 9, NONE, "mount points (0-50)");
         // files and errors
         t.item(STATIC, SS_NOPREFIX, 7, 222, 306, 26, ID_PINFO, "");
         t.item(STATIC, SS_NOPREFIX, 7, 249, 196, 22, ID_PERROR, "");
@@ -681,7 +724,8 @@ mod imp {
             auto_compact_under: text(hwnd, ID_PAUTO),
             write_empty_pak: checked(hwnd, ID_PWRITEPAK),
             warn_pak_needed: checked(hwnd, ID_PWARNPAK),
-            new_mount_point: text(hwnd, ID_PMOUNT),
+            ask_mount_point: checked(hwnd, ID_PMOUNT),
+            mount_point_history: text(hwnd, ID_PHISTORY),
             validate: sel(hwnd, ID_PVALID),
         }
     }
@@ -743,7 +787,8 @@ mod imp {
                     0,
                 );
                 SetDlgItemTextW(hwnd, ID_PAUTO as i32, wide(&f.auto_compact_under).as_ptr());
-                SetDlgItemTextW(hwnd, ID_PMOUNT as i32, wide(&f.new_mount_point).as_ptr());
+                SendDlgItemMessageW(hwnd, ID_PMOUNT as i32, BM_SETCHECK, f.ask_mount_point as usize, 0);
+                SetDlgItemTextW(hwnd, ID_PHISTORY as i32, wide(&f.mount_point_history).as_ptr());
                 SetDlgItemTextW(hwnd, ID_PINFO as i32, st.info.as_ptr());
                 update_enabled(hwnd);
                 1
@@ -819,6 +864,132 @@ mod imp {
         }
         st.answer
     }
+
+    // ---- mount point for a new container ----
+
+    const ID_MTEXT: u16 = 320;
+    const ID_MCOMBO: u16 = 321;
+    const ID_MPREVIEW: u16 = 322;
+    const CBN_EDITCHANGE: u32 = 5;
+
+    struct MState<'a> {
+        p: &'a MountPrompt<'a>,
+        answer: Option<String>,
+    }
+
+    fn mount_template() -> Vec<u32> {
+        const BUTTON: u16 = 0x80;
+        const STATIC: u16 = 0x82;
+        const COMBOBOX: u16 = 0x85;
+        const SS_NOPREFIX: u32 = 0x80;
+        const SS_PATHELLIPSIS: u32 = 0x8000;
+        const CBS_DROPDOWN: u32 = 2;
+        const CBS_AUTOHSCROLL: u32 = 0x40;
+        const BS_DEFPUSHBUTTON: u32 = 1;
+        const NONE: u16 = 0xFFFF;
+        let mut t = Tpl::dialog("UE IoStore plugin: new container", 330, 132);
+        t.item(STATIC, SS_NOPREFIX | SS_PATHELLIPSIS, 7, 7, 316, 9, ID_MTEXT, "");
+        t.item(STATIC, 0, 7, 24, 52, 9, NONE, "Mount &point:");
+        t.item(COMBOBOX, CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP, 62, 22, 261, 140, ID_MCOMBO, "");
+        t.item(
+            STATIC,
+            SS_NOPREFIX,
+            7,
+            41,
+            316,
+            26,
+            NONE,
+            "Each copied file goes to the mount point + its path in the copy; a path that already starts with the mount point's folders is used as it is. Auto: the common folder of the files (as UE does).",
+        );
+        t.item(STATIC, SS_NOPREFIX, 7, 71, 316, 34, ID_MPREVIEW, "");
+        t.item(BUTTON, BS_DEFPUSHBUTTON | WS_TABSTOP, 219, 111, 50, 14, 1, "OK");
+        t.item(BUTTON, WS_TABSTOP, 273, 111, 50, 14, 2, "Cancel");
+        t.into_dwords()
+    }
+
+    /// Current text of the combo; on a selection change the edit isn't updated yet.
+    unsafe fn combo_text(hwnd: HWND, selchange: bool) -> String {
+        if selchange {
+            let i = SendDlgItemMessageW(hwnd, ID_MCOMBO as i32, CB_GETCURSEL, 0, 0);
+            if i >= 0 {
+                let n = SendDlgItemMessageW(hwnd, ID_MCOMBO as i32, CB_GETLBTEXTLEN, i as usize, 0);
+                if n >= 0 {
+                    let mut buf = vec![0u16; n as usize + 1];
+                    SendDlgItemMessageW(hwnd, ID_MCOMBO as i32, CB_GETLBTEXT, i as usize, buf.as_mut_ptr() as LPARAM);
+                    return String::from_utf16_lossy(&buf[..n as usize]);
+                }
+            }
+        }
+        text(hwnd, ID_MCOMBO)
+    }
+
+    unsafe fn update_preview(hwnd: HWND, st: &MState, t: &str) -> bool {
+        let (ok, msg) = match (st.p.preview)(t) {
+            Ok(m) => (true, m),
+            Err(e) => (false, format!("\u{26A0} {e}")),
+        };
+        SetDlgItemTextW(hwnd, ID_MPREVIEW as i32, wide(&msg).as_ptr());
+        EnableWindow(GetDlgItem(hwnd, 1), ok as i32);
+        ok
+    }
+
+    unsafe extern "system" fn mproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> isize {
+        match msg {
+            WM_INITDIALOG => {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, lp);
+                let st = &*(lp as *const MState);
+                SetDlgItemTextW(hwnd, ID_MTEXT as i32, wide(&st.p.container.display().to_string()).as_ptr());
+                for c in st.p.choices {
+                    let w = wide(c);
+                    SendDlgItemMessageW(hwnd, ID_MCOMBO as i32, CB_ADDSTRING, 0, w.as_ptr() as LPARAM);
+                }
+                SetDlgItemTextW(hwnd, ID_MCOMBO as i32, wide(st.p.preset).as_ptr());
+                update_preview(hwnd, st, st.p.preset);
+                1
+            }
+            WM_COMMAND => {
+                let id = (wp & 0xFFFF) as u16;
+                let code = ((wp >> 16) & 0xFFFF) as u32;
+                let st = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut MState;
+                if st.is_null() {
+                    return 0;
+                }
+                if id == ID_MCOMBO && (code == CBN_EDITCHANGE || code == CBN_SELCHANGE) {
+                    let t = combo_text(hwnd, code == CBN_SELCHANGE);
+                    update_preview(hwnd, &*st, &t);
+                    return 1;
+                }
+                if id == 1 {
+                    let t = combo_text(hwnd, false);
+                    if update_preview(hwnd, &*st, &t) {
+                        (*st).answer = Some(t);
+                        EndDialog(hwnd, 1);
+                    }
+                    return 1;
+                }
+                if id == 2 {
+                    EndDialog(hwnd, 0);
+                    return 1;
+                }
+                0
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn ask_mount_point(p: &MountPrompt) -> Option<String> {
+        let mut st = MState { p, answer: None };
+        let tpl = mount_template();
+        let r = unsafe {
+            DialogBoxIndirectParamW(crate::win::module_handle(), tpl.as_ptr() as *const DLGTEMPLATE, GetActiveWindow(), Some(mproc), &mut st as *mut MState as LPARAM)
+        };
+        if r == -1 {
+            let err = unsafe { GetLastError() };
+            crate::dlog!("mount point dialog could not be created (error {err})");
+            crate::win::error(&format!("The mount point dialog could not be shown (Windows error {err})."));
+        }
+        st.answer
+    }
 }
 
 
@@ -829,6 +1000,9 @@ mod imp {
         None
     }
     pub fn prompt_version(_p: &VersionPrompt) -> Option<VersionAnswer> {
+        None
+    }
+    pub fn ask_mount_point(_p: &MountPrompt) -> Option<String> {
         None
     }
     pub fn configure_pack(

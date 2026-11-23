@@ -94,8 +94,12 @@ pub struct PackOptions {
     pub compact: bool,
     /// Rebuild containers smaller than this after a change (0 = never).
     pub auto_compact_under: u64,
-    /// New containers: `Auto` (UE: common root of the files) or a mount point.
-    pub new_mount_point: Option<String>,
+    /// New containers: ask for the mount point every time (else the last one is used).
+    pub ask_mount_point: bool,
+    /// How many mount points the dialog remembers (0 = none).
+    pub mount_point_history: usize,
+    /// Last mount points, newest first: `Auto` or `../../../…/` (saved by the plugin).
+    pub recent_mount_points: Vec<String>,
     pub validate_on_replace: ValidateOnReplace,
     pub validate_on_add: ValidateOnAdd,
 }
@@ -111,7 +115,9 @@ impl Default for PackOptions {
             warn_pak_needed: true,
             compact: false,
             auto_compact_under: 10 << 20,
-            new_mount_point: None,
+            ask_mount_point: true,
+            mount_point_history: 10,
+            recent_mount_points: Vec::new(),
             validate_on_replace: ValidateOnReplace::Warn,
             validate_on_add: ValidateOnAdd::Warn,
         }
@@ -224,6 +230,25 @@ fn is_writable_dir(dir: &Path) -> bool {
         }
         Err(_) => false,
     }
+}
+
+/// A remembered mount point: `Auto`, or `../../../…/` with `/` separators.
+pub fn normalize_recent(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if t.eq_ignore_ascii_case("auto") {
+        return Some("Auto".into());
+    }
+    let mut m = t.replace('\\', "/");
+    if m.contains(['"', '*', '?', '<', '>', '|', ':']) {
+        return None;
+    }
+    if !m.ends_with('/') {
+        m.push('/');
+    }
+    Some(m)
 }
 
 /// Directory for writable plugin data (options, remembered AES keys).
@@ -491,11 +516,23 @@ fn parse_pack_option(opts: &mut Options, key: &str, raw: &str) {
         "warnpakneeded" => parse_bool(raw).map(|b| p.warn_pak_needed = b).is_some(),
         "compact" => parse_bool(raw).map(|b| p.compact = b).is_some(),
         "autocompactunder" => parse_size(raw).map(|n| p.auto_compact_under = n).is_some(),
+        "askmountpoint" => parse_bool(raw).map(|b| p.ask_mount_point = b).is_some(),
+        "mountpointhistory" => raw.trim().parse::<usize>().ok().filter(|n| *n <= 50).map(|n| p.mount_point_history = n).is_some(),
+        "recentmountpoints" => {
+            for m in raw.split('|').filter_map(normalize_recent) {
+                if !p.recent_mount_points.iter().any(|r| r.eq_ignore_ascii_case(&m)) {
+                    p.recent_mount_points.push(m);
+                }
+            }
+            true
+        }
+        // before the mount-point dialog: becomes the oldest remembered entry
         "newmountpoint" | "mountpoint" => {
-            p.new_mount_point = match lower.as_str() {
-                "" | "auto" => None,
-                _ => Some(raw.replace('\\', "/")),
-            };
+            if let Some(m) = normalize_recent(raw).filter(|m| m != "Auto") {
+                if !p.recent_mount_points.iter().any(|r| r.eq_ignore_ascii_case(&m)) {
+                    p.recent_mount_points.push(m);
+                }
+            }
             true
         }
         _ => true,
@@ -540,7 +577,10 @@ mod tests {
         assert_eq!(p.oodle_level, iostore::write::OodleLevel::Optimal2);
         assert!(!p.write_empty_pak && p.warn_pak_needed);
         assert_eq!(p.auto_compact_under, 2 << 20);
-        assert_eq!(p.new_mount_point.as_deref(), Some("../../../Game/"));
+        assert_eq!(p.recent_mount_points, ["../../../Game/"]);
+        let p = parse_options("[Pack]\nNewMountPoint=../../../Old\nRecentMountPoints=auto|..\\..\\..\\A| ../../../Old/ \nMountPointHistory=3\nAskMountPoint=0").pack;
+        assert_eq!(p.recent_mount_points, ["../../../Old/", "Auto", "../../../A/"], "file order; NewMountPoint first here as it comes first");
+        assert_eq!((p.mount_point_history, p.ask_mount_point), (3, false));
         let d = parse_options("").pack;
         assert_eq!((d.validate_on_add, d.compression, d.auto_compact_under), (ValidateOnAdd::Warn, PackCompression::Match, 10 << 20));
         assert_eq!(parse_options("[Pack]\nCompression=Zstd").warnings.len(), 1);
