@@ -32,10 +32,11 @@ decisions: [SPEC.md](SPEC.md).
   (not above `Paks`).
 - **Packing** (F5/Alt+F5 onto a container, F8 inside one): raw Zen files as the plugin extracts
   them, or legacy cooked `.uasset`/`.umap` + `.uexp` (+ bulk files), converted to Zen on the way in
-  (UE 4.27–5.8; the engine's own legacy cook comes out byte-identical to its Zen cook). A file the game already has (any container
-  under the global's folder) keeps its chunk
-  ID, path and store entry and only the data is replaced. **New files** (UE 5.3+ games): a new
-  package gets the chunk ID of the name inside it and a store entry built from its own imports;
+  (UE 4.27–5.8; the engine's own legacy cook comes out byte-identical to its Zen cook). A file
+  the game already has (any container under the global's folder) keeps its chunk ID, path and
+  store entry and only the data is replaced. **New files** (raw Zen: UE 5.3+ games; legacy: any
+  version): a new package gets the chunk ID of the name inside it and a store entry built from
+  its imports;
   its `.ubulk`/`.uptnl`/`.m.ubulk` files go with it. Adding asks once per copy (and shows how the
   container's mount point changes, if it has to). Refused, with one message for the whole copy:
   `.ini`/`.locres` and other companion-pak files, a legacy package without its `.uexp`,
