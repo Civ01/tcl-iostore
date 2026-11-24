@@ -207,6 +207,8 @@ pub struct Input {
     /// Path inside the archive as TC shows it (`\`-separated).
     pub archive_path: String,
     pub len: u64,
+    /// A legacy package converted to Zen (N2): `src` is the converted file.
+    pub converted: Option<crate::legacy_pack::Converted>,
 }
 
 /// Files from TC's list (directories, ending in `\`, are skipped). `SAVE_PATHS` off: file
@@ -228,7 +230,7 @@ pub fn inputs(src_path: &Path, sub_path: Option<&str>, items: &[String], flags: 
             Some(sub) => format!("{sub}\\{rel}"),
             None => rel,
         };
-        out.push(Input { src, archive_path, len: meta.len() });
+        out.push(Input { src, archive_path, len: meta.len(), converted: None });
     }
     if out.is_empty() {
         return Err(PackError::User("No files to pack (folders alone can't be stored).".into()));
@@ -286,12 +288,14 @@ pub struct Refusals {
     pub not_in_game: Vec<String>,
     pub companion_pak: Vec<String>,
     pub legacy: Vec<String>,
+    /// Legacy packages that couldn't be converted (N2): "path: reason".
+    pub legacy_failed: Vec<String>,
     pub read_only: Vec<String>,
 }
 
 impl Refusals {
     pub fn is_empty(&self) -> bool {
-        self.not_in_game.is_empty() && self.companion_pak.is_empty() && self.legacy.is_empty() && self.read_only.is_empty()
+        self.not_in_game.is_empty() && self.companion_pak.is_empty() && self.legacy.is_empty() && self.legacy_failed.is_empty() && self.read_only.is_empty()
     }
     pub fn message(&self, unreadable: &[String]) -> String {
         let mut s = String::from("Nothing was packed. These files can't go into this container:\n");
@@ -309,7 +313,8 @@ impl Refusals {
         };
         list(&mut s, "Not in the game, and not a package or bulk file (shader libraries and other chunk files can only replace the game's)", &self.not_in_game);
         list(&mut s, "Belong in the companion .pak, not in IoStore", &self.companion_pak);
-        list(&mut s, "Legacy cooked files (.uasset/.uexp): packing them comes later; use the raw Zen files", &self.legacy);
+        list(&mut s, "Legacy packages that can't be converted to Zen", &self.legacy_failed);
+        list(&mut s, "A .uexp without its legacy .uasset/.umap (copy them together; they are converted to Zen)", &self.legacy);
         list(&mut s, "Read-only ($legacy view, the global container, the container header)", &self.read_only);
         if !unreadable.is_empty() && !self.not_in_game.is_empty() {
             s.push_str(&format!("\n{} container(s) of the game couldn't be searched:\n", unreadable.len()));
@@ -328,7 +333,7 @@ fn is_iostore_type(path: &str) -> bool {
 }
 
 /// Legacy cooked `.uasset`/`.umap`: starts with the package file tag.
-fn is_legacy_package(path: &Path) -> bool {
+pub(crate) fn is_legacy_package(path: &Path) -> bool {
     use std::io::Read;
     let mut b = [0u8; 4];
     std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut b)).is_ok() && u32::from_le_bytes(b) == 0x9E2A_83C1
@@ -509,10 +514,10 @@ fn serialize_header(h: &FIoContainerHeader) -> Result<Vec<u8>, String> {
 
 /// Store entries of packages taken from other containers, cached per container.
 #[derive(Default)]
-struct HeaderCache(HashMap<String, Option<FIoContainerHeader>>);
+pub(crate) struct HeaderCache(HashMap<String, Option<FIoContainerHeader>>);
 
 impl HeaderCache {
-    fn get(&mut self, utoc: &Path) -> Result<Option<&FIoContainerHeader>, String> {
+    pub(crate) fn get(&mut self, utoc: &Path) -> Result<Option<&FIoContainerHeader>, String> {
         let k = utoc.to_string_lossy().to_lowercase();
         if !self.0.contains_key(&k) {
             let c = open_quiet(utoc)?;
@@ -613,9 +618,14 @@ fn apply(
                 Op::Replace { index } => {
                     edit.replace(*index, &mut f, s.input.len, compressor, &mut cancel)?;
                     replaced += 1;
-                    if let (Some(fixed), Some((_, h))) = (fixes.get(&s.id), &mut header) {
-                        h.add_package(retoc::FPackageId(s.id.id64()), fixed.clone());
-                        header_changed = true;
+                    if let Some((_, h)) = &mut header {
+                        let package = retoc::FPackageId(s.id.id64());
+                        // a converted legacy package brings its own entry (N2)
+                        let entry = fixes.get(&s.id).cloned().or_else(|| s.input.converted.as_ref().map(|c| crate::legacy_pack::merged_entry(&c.entry, h.get_store_entry(package).as_ref())));
+                        if let Some(entry) = entry {
+                            h.add_package(package, entry);
+                            header_changed = true;
+                        }
                     }
                 }
                 Op::New { full, entry, memory_mapped } => {
@@ -645,7 +655,8 @@ fn apply(
                     if is_package(&s.id, version) {
                         let src = cache.get(&from.utoc).map_err(PackError::Failed)?;
                         let package = retoc::FPackageId(s.id.id64());
-                        let entry = fixes.get(&s.id).cloned().or_else(|| src.and_then(|h| h.get_store_entry(package)));
+                        let game_entry = src.and_then(|h| h.get_store_entry(package));
+                        let entry = fixes.get(&s.id).cloned().or_else(|| s.input.converted.as_ref().map(|c| crate::legacy_pack::merged_entry(&c.entry, game_entry.as_ref()))).or(game_entry);
                         let refs = src.map(|h| h.soft_references().map(|r| r.get(&package).cloned().unwrap_or_default())).transpose().map_err(|e| PackError::Failed(format!("{e:#}")))?.unwrap_or_default();
                         match (&mut header, entry) {
                             (Some((_, h)), Some(entry)) => {
@@ -795,6 +806,11 @@ pub fn validate_steps(steps: &[Step], game: &Game, utoc: &Path, target_header: O
                 v.findings.push(one(Issue::Unreadable(format!("the game's version: {e}"))));
                 continue;
             }
+        };
+        // a converted legacy package is read and checked with the entry to-zen built for it (N2)
+        let entry = match &s.input.converted {
+            Some(c) => crate::legacy_pack::merged_entry(&c.entry, Some(&entry)),
+            None => entry,
         };
         let new_entry = if validate::names_imports(hv) { None } else { Some(entry.clone()) };
         let new = std::fs::File::open(&s.input.src).map_err(|e| e.to_string()).and_then(|f| validate::read_header(&mut std::io::BufReader::new(f), new_entry, toc, hv));
@@ -980,10 +996,27 @@ pub fn pack_files(packed: &Path, sub_path: Option<&str>, src_path: &Path, items:
     let started = std::time::Instant::now();
     let game = Game::build(&global);
     dlog!("  game: {} containers, {} paths, {} unreadable, {} ms", game.containers.len(), game.by_path.len(), game.unreadable.len(), started.elapsed().as_millis());
-    let input_bytes: u64 = inputs.iter().map(|i| i.len).sum();
     if exists {
         let (edit, header) = open_edit(&utoc)?;
-        let (mut steps, refusals, cands) = plan(&inputs, &game, &utoc, Some(&edit), options.mount_point, None);
+        // legacy packages → Zen (N2)
+        let target_mount = edit.mount_point().map(String::from);
+        let full_of = |p: &str| -> String {
+            let rel = p.replace('\\', "/");
+            match (options.mount_point, &target_mount) {
+                (MountPointMode::Root, Some(m)) => format!("{m}{rel}"),
+                (_, Some(m)) => format!("{}{rel}", crate::view::Mount::parse(m).base),
+                (_, None) => format!("../../../{rel}"),
+            }
+        };
+        let hv = header.as_ref().map(|h| h.1.version).or_else(|| game_header_version(&game));
+        let prepared = crate::legacy_pack::prepare(inputs, &game, edit.toc().header.version, hv, &full_of)?;
+        if prepared.converted > 0 {
+            dlog!("  {} legacy packages converted to Zen", prepared.converted);
+        }
+        let inputs = &prepared.inputs;
+        let input_bytes: u64 = inputs.iter().map(|i| i.len).sum();
+        let (mut steps, mut refusals, cands) = plan(inputs, &game, &utoc, Some(&edit), options.mount_point, None);
+        refusals.legacy_failed = prepared.refused.iter().map(|(f, r)| format!("{f}: {r}")).collect();
         if !refusals.is_empty() {
             return Err(PackError::User(refusals.message(&game.unreadable)));
         }
@@ -1022,12 +1055,22 @@ pub fn pack_files(packed: &Path, sub_path: Option<&str>, src_path: &Path, items:
     } else {
         let global_toc = game.containers.iter().find(|c| c.is_global).map(|c| c.version).unwrap_or(TocVersion(8));
         let mount = choose_new_mount(&utoc, &inputs, &game, global_toc, opts)?;
+        // legacy packages → Zen (N2), at the paths the mount point gives
+        let in_game = |f: &str| game.by_path.contains_key(&full_key(f));
+        let full_of = |p: &str| -> String { new_container_full(&p.replace('\\', "/"), mount.as_deref(), in_game) };
+        let prepared = crate::legacy_pack::prepare(inputs, &game, global_toc, game_header_version(&game), &full_of)?;
+        if prepared.converted > 0 {
+            dlog!("  {} legacy packages converted to Zen", prepared.converted);
+        }
+        let inputs = &prepared.inputs;
+        let input_bytes: u64 = inputs.iter().map(|i| i.len).sum();
         dlog!("  new container mount point: {}", mount.as_deref().unwrap_or("Auto"));
         let hint = |e: PackError| match e {
             PackError::User(m) => PackError::User(format!("{m}\n\nMount point for the copied files: {}", mount.as_deref().unwrap_or("Auto (the common folder of the files)"))),
             e => e,
         };
-        let (mut steps, refusals, cands) = plan(&inputs, &game, &utoc, None, options.mount_point, mount.as_deref());
+        let (mut steps, mut refusals, cands) = plan(inputs, &game, &utoc, None, options.mount_point, mount.as_deref());
+        refusals.legacy_failed = prepared.refused.iter().map(|(f, r)| format!("{f}: {r}")).collect();
         if !refusals.is_empty() {
             return Err(hint(PackError::User(refusals.message(&game.unreadable))));
         }

@@ -672,7 +672,7 @@ dependencies = [
 [[package]]
 name = "iostore"
 version = "0.1.5"
-source = "git+https://github.com/Civ01/retoc?branch=tcl-iostore#e7e9a29a6072d6d35aa23df502531e0cbce039b8"
+source = "git+https://github.com/Civ01/retoc?branch=tcl-iostore#f486eead9ac3df3040db6a3904ca7e325c2dafda"
 dependencies = [
  "aes",
  "blake3",
@@ -1131,7 +1131,7 @@ dependencies = [
 [[package]]
 name = "retoc"
 version = "0.1.5"
-source = "git+https://github.com/Civ01/retoc?branch=tcl-iostore#e7e9a29a6072d6d35aa23df502531e0cbce039b8"
+source = "git+https://github.com/Civ01/retoc?branch=tcl-iostore#f486eead9ac3df3040db6a3904ca7e325c2dafda"
 dependencies = [
  "aes",
  "anyhow",

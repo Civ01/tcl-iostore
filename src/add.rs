@@ -188,15 +188,18 @@ pub fn plan_new(cands: &[Candidate], game: &GameView, mode: ValidateOnAdd) -> Ne
     let mut pkgs: Vec<Pkg> = Vec::new();
     for c in cands.iter().filter(|c| matches!(ext_of(&c.full).as_str(), "uasset" | "umap")) {
         let shown = visible(&c.full).to_string();
-        let Some(hv) = game.header.filter(|h| validate::names_imports(*h)) else {
-            plan.refused.push((shown, "new packages need a UE 5.3+ game (older packages don't name their imports)".into()));
+        let converted = c.input.converted.as_ref();
+        // a converted legacy package has a full store entry from to-zen (N2): any version
+        let Some(hv) = game.header.filter(|h| converted.is_some() || validate::names_imports(*h)) else {
+            plan.refused.push((shown, "new packages need a UE 5.3+ game (older packages don't name their imports); a legacy .uasset + .uexp can be added to older games".into()));
             continue;
         };
         let Some(toc) = toc else {
             plan.refused.push((shown, format!("TOC version {}", game.toc.0)));
             continue;
         };
-        let header = std::fs::File::open(&c.input.src).map_err(|e| e.to_string()).and_then(|f| validate::read_header(&mut std::io::BufReader::new(f), None, toc, hv));
+        let read_entry = converted.filter(|_| !validate::names_imports(hv)).map(|x| x.entry.clone());
+        let header = std::fs::File::open(&c.input.src).map_err(|e| e.to_string()).and_then(|f| validate::read_header(&mut std::io::BufReader::new(f), read_entry, toc, hv));
         let h = match header {
             Ok(h) => h,
             Err(e) => {
@@ -210,7 +213,10 @@ pub fn plan_new(cands: &[Candidate], game: &GameView, mode: ValidateOnAdd) -> Ne
             plan.refused.push((shown, format!("the game already has {name} at {at}: drop it there to replace it")));
             continue;
         }
-        let entry = StoreEntry { imported_packages: h.imported_packages.clone(), ..Default::default() };
+        let entry = match converted {
+            Some(x) => x.entry.clone(),
+            None => StoreEntry { imported_packages: h.imported_packages.clone(), ..Default::default() },
+        };
         let mut to = None;
         if mode != ValidateOnAdd::Off {
             let expected = name_for_path(&shown);

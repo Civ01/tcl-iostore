@@ -5,7 +5,7 @@ Total Commander 11+ x64 packer plugin (`uetoc.wcx64`) for Unreal Engine IoStore 
 legacy `.pak`), whose skeleton, conventions and lessons it reuses; companion of
 [tcl-uassetvw](https://github.com/Civ01/tcl-uassetvw) (Lister plugin for `.uasset`).
 
-Spec version: v4 (2026-11-23). This document describes the plugin **as built**; history and
+Spec version: v4.1 (2026-11-24). This document describes the plugin **as built**; history and
 superseded plans were removed (see git history before v4). Decisions are the user's unless marked
 *(default)* = chosen by me, open to change.
 
@@ -23,12 +23,15 @@ superseded plans were removed (see git history before v4). Decisions are the use
 | N7 | `:uetoc.source` NTFS stream for tcl-uassetvw (§9) | done 2026-11-20 |
 | N1b | New files: packages (5.3+) and their bulk files, `ValidateOnAdd`, mount-point question (§8.4, §8.6) | done 2026-11-20 |
 | — | New-container mount-point dialog, paths that follow the mount point (§8.3) | done 2026-11-23 |
+| N2 | Packing legacy cooked files (`.uasset`+`.uexp`), converted to Zen; all versions 4.27–5.8 (§8.9) | done 2026-11-24 |
 
 Remaining work: §15.
 
 ### Non-goals
-- New packages for pre-5.3 games (their packages don't name their imports; §8.4).
-- New raw chunk files other than packages and bulk files (shader libraries, …) — possibly with N2.
+- New *raw Zen* packages for pre-5.3 games (their packages don't name their imports; §8.4) —
+  legacy files work there (§8.9).
+- New raw chunk files other than packages and bulk files (shader libraries, …); legacy shader
+  libraries are N2b (§15).
 - UE 4.25/4.26 containers (TOC v1/v2): may work, not tested or promised.
 - Showing the companion `.pak` contents (tcl-uepak does that). No `.pak` writing except the empty
   companion `.pak` (§8.3); repak is not linked into the plugin.
@@ -204,11 +207,12 @@ entries of all loaded containers.
 ### 7.2 UE 5.8 specifics
 - `FShaderHash` is 8 bytes (was 20) with no format version change: store entries, IoStore shader
   libraries (size detected from the buffers), legacy library version 3, asset info version 2.
-  5.8 shader-group chunk ids are xxHash128 (only matters for to-zen, N2).
+  5.8 shader-group chunk ids are xxHash128 (only matters for converting shader libraries, N2b).
 - UE 5.8 writes `FObjectImport::PackageName` in cooked packages too (ObjectName stands in for None);
   earlier engines only uncooked.
-- Zen `_Unused` (was CookedHeaderSize): ≤5.6 legacy header size, 5.7.0–5.7.4 size − 8, 5.8
-  size − 8 − 8 × imports. Harmless for `$legacy`; N2 must write it.
+- Zen `_Unused` (was CookedHeaderSize) = legacy header size − 8 if the package has import type
+  hierarchies (5.7+) − 8 × imports if its imports carry `PackageName` (5.8)
+  (`PackageStoreOptimizer.cpp`). Written that way by to-zen (§8.9); harmless for `$legacy`.
 
 ### 7.3 Differences from the engine's own cook
 Measured on the 5.8 SML sample (engine cook of `BP_SML`, `BP_Monitor`, `M_dummy`, `T_dummy`) with an
@@ -248,10 +252,11 @@ The game = every container under the global's folder. Each input is classified (
 | a file the game has at the same path in another container | **copy**: that container's chunk id, path and store entry |
 | a `$chunks` file | matched by chunk id (file name), as above |
 | a package/bulk file the game doesn't have | **new file** (§8.4) |
+| a legacy `.uasset`/`.umap` + `.uexp` | converted to Zen first (§8.9), then as above |
 
 Refused — whole copy cancelled, one message listing the files by reason, nothing written:
 - files that belong in the companion `.pak` (`.ini`, `.locres`, `AssetRegistry.bin`, `.uplugin`, …);
-- legacy cooked files (`.uasset` with the legacy magic, `.uexp`): N2;
+- legacy packages that can't be converted (no `.uexp`, conversion fails), a `.uexp` alone (§8.9);
 - other new chunk files (shader libraries, …) and new files that can't be added (§8.4);
 - anything into `$legacy`, into the global container, or `ContainerHeader` (always rebuilt).
 
@@ -352,6 +357,37 @@ stays open. OK writes `[Pack]` keeping comments in their column. `[Options]` are
 
 ---
 
+### 8.9 Legacy cooked input (N2)
+Legacy packages (`.uasset`/`.umap` with the legacy magic + `.uexp`) are converted to Zen with the
+fork's to-zen before the copy is planned (`legacy_pack.rs`); from there they go through §8.1–§8.6
+like raw Zen files. Mixed raw + legacy copies work.
+- **Pairing:** the `.uexp` (and `.ubulk`/`.uptnl`/`.m.ubulk`) next to the package, whether the copy
+  names them or not; bulk data is the same in both formats. A package without `.uexp` or a `.uexp`
+  alone is refused.
+- **Engine version:** a versioned package uses its own. An unversioned one uses the game's (TOC +
+  container-header version); where those allow different object versions (5.6 vs 5.7/5.8), the one
+  whose summary ends where the name map starts. 5.8's import layout (`PackageName` per import) is
+  recognised from the import map's size. No prompt.
+- **Output:** the engine's: Zen header, export map, dependency bundles (copied from the legacy
+  preload dependencies per export as `ProcessPreloadDependencies` does, only script imports left
+  out), `_Unused` (§7.2). The engine's own legacy cook of 29 UE 5.8 packages packs byte-identical
+  to the engine's Zen cook of them, store entries equal (`IOSTORE_LEGACY_REF` test).
+- **Store entry:** to-zen's (imports; export counts and bundles before 5.3), so new legacy packages
+  work in every version, not only 5.3+. Replacing or copying over a game package keeps the game's
+  shader-map hashes (shader libraries aren't converted, N2b). `ValidateOnReplace` checks the
+  converted package against the converted entry, so only the name, removed public exports and
+  changed classes can come up; `ValidateOnAdd` as for raw packages.
+- **UE 4.27:** Zen packages carry arcs to the export bundles of the packages they import. They are
+  resolved against the packages converted in the same copy, else against the game's own Zen
+  packages (`LegacyExportBundles`: every export keyed by the hash of its path, so subobjects such
+  as widget trees resolve too; single-bundle packages trivially). Arcs to packages neither has
+  are written as "last bundle" and logged. On the 4.27 sample, arcs equal the game's for 25 of 28
+  packages; the 3 others come from the `$legacy` round trip used to make the input.
+- Converted packages go to a temporary folder (`%TEMP%\uetoc-pack-*`), removed afterwards.
+- Tests: `legacy_input_matches_the_engine_cook` (engine reference), `legacy_round_trip_replaces_and_adds`
+  (35 sample games, 4.27–5.8: a package's `$legacy` files replace it with ValidateOnReplace=Error,
+  are added back after deleting it — pre-5.3 included —, imports equal; `.uasset` alone refused).
+
 ## 9. Source stream (N7)
 On extraction an NTFS stream `<file>:uetoc.source` (format `uetoc-source 1`: legacy flag,
 container, paks folder, entry, chunk, TOC hash, engine/engine range for `$legacy`) lets
@@ -413,7 +449,7 @@ returns `E_EABORTED`, so TC adds "User abort!" after the plugin's message (as ue
 ---
 
 ## 14. Testing
-`cargo test --release`, 49 tests. Samples in `IOSTORE_SAMPLES` (a folder of sample sets; sets that
+`cargo test --release`, 52 tests. Samples in `IOSTORE_SAMPLES` (a folder of sample sets; sets that
 are shader-only break the read tests), Oodle library folder in `IOSTORE_OODLE`, keys from `key.txt`
 next to a container. Without samples the sample tests skip (CI). Windows CI checks real NTFS
 streams.
@@ -421,6 +457,9 @@ streams.
   info view; mount-point views; `$chunks`; global lookup rules; key dialog flow; damaged block.
 - **`$legacy`:** byte comparison with retoc's CLI output (`RETOC_LEGACY_REF`), engine-version prompt
   (`IOSTORE_UNVERSIONED_56`).
+- **Legacy input:** engine reference (`IOSTORE_LEGACY_REF`: sets of `game/` + `legacy/`, e.g. the 5.8
+  Moadra `.pak` contents with gzip entries unpacked against the matching IoStore containers),
+  round trip on every sample.
 - **Packing:** replace every file with itself; copy from another container + new container (repak
   reads the pak); refusals leave the container untouched; interrupted change restored; empty pak;
   `ValidateOnReplace` self-check on whole games (`VALIDATE_SELF`) and every mode; new packages on
@@ -449,30 +488,28 @@ streams.
 - Wine's dialog font draws ⚠ and → as boxes (fine on Windows). Lister wraps at ~75 characters.
 - Packing checked: replace + auto-compact (hashes identical), refusals, new patch container with
   `.pak`, F8, Configure dialog, ValidateOnReplace prompt/report, N1b question with mount block,
-  mount-point dialog (file alone and with folders give byte-identical containers).
+  mount-point dialog (file alone and with folders give byte-identical containers); legacy input:
+  the engine's legacy `Mods\SML` tree (16 packages) F5'd onto `pakchunk11`, 16 converted and
+  replaced in 0.5 s, every package chunk byte-identical to the engine's container (TC asked its own
+  overwrite question for the `.uasset` names first).
 
 ---
 
 ## 15. Remaining work
 
-**N2 — packing legacy cooked files** (next). Legacy `.uasset` + `.uexp` (+ bulk) converted to Zen
-on pack with retoc's `to-zen`, then handed to the N1/N1b paths (replace, copy, new file). Pieces:
-- detect legacy input (package magic, `.uexp` pairing; bulk files follow their package);
-- target engine version from the game, as for `$legacy` (§7.1), prompt when ambiguous;
-- script objects from the global (mandatory already), imports resolved against the game;
-- write the per-version Zen `_Unused` value (§7.2) and the exact 5.8 import layout;
-- store entry from to-zen (imports and, with shader libraries, shader-map hashes) — compared with
-  the game's entry by `ValidateOnReplace` for replacements;
-- optional: legacy shader libraries (`.ushaderbytecode`) → IoStore libraries, which would give new
-  materials their shader maps; needs 5.8 shader-group ids (xxHash128 over 8-byte hashes);
-- tests: round trip `$legacy` → pack → game-identical chunks on every sample, the engine's own
-  legacy cook (SHADERBYTECODE and 5.8 SML samples) as input.
+**N2b — legacy shader libraries** (next candidate). A dropped `.ushaderbytecode` + its
+`ShaderAssetInfo-*.assetinfo.json` converted to IoStore shader chunks, and the shader-map hashes of
+the packages it lists filled in, so new or changed materials get their shaders. Needs 5.8
+shader-group ids (xxHash128 over 8-byte hashes); retoc's conversion covers ≤ 5.7. Reference: the
+SHADERBYTECODE sample (`.pak` libraries vs IoStore chunks of the same cook).
 
 **Other**
 - N4 custom game profiles (CUE4Parse ports) — needs the user's game samples.
 - N5 TOC v9/v10 — when a released engine writes them.
 - N6 tcl-uepak follow-ups: Find Files key-prompt grace; the 5.8 sample `.pak` labels gzip streams
   as Zlib (repak left them compressed).
+- tcl-uepak follow-up from N2: repak leaves the 5.8 sample's gzip-in-"Zlib" entries compressed
+  (43 files).
 - Real Windows checks: dialog layout and fonts, install from the CI package and the `.utoc`
   association (pluginst.inf names only `.ucas`), `dir /r` on a dragged-out package (§9).
 - Block signature rule (The Isle `Signed`); on-demand containers if a sample turns up.

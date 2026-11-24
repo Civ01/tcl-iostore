@@ -254,7 +254,7 @@ fn refusals_leave_the_container_untouched() {
     let items = ["Legacy.uasset", "New.uasset", "DefaultGame.ini"].map(String::from);
     match pack::pack_files(&utoc.with_extension("ucas"), Some("Game\\Content"), &src, &items, pack::PK_PACK_SAVE_PATHS, &options(false)) {
         Err(PackError::User(msg)) => {
-            assert!(msg.contains("companion .pak") && msg.contains("Legacy cooked"), "{msg}");
+            assert!(msg.contains("companion .pak") && msg.contains("can't be converted") && msg.contains("without its .uexp"), "{msg}");
         }
         other => panic!("expected a refusal, got {:?}", other.err()),
     }
@@ -881,4 +881,174 @@ fn new_container_mount_point_dialog() {
         let _ = std::fs::remove_dir_all(&copy);
     }
     eprintln!("mount point dialog: {tested} games");
+}
+
+// ---------------------------------------------------------------------------
+// N2: legacy cooked input
+
+/// Engine version of a sample from its folder name (`ue5.6`, `5.8`, `ue4.27`), for `$legacy`.
+fn version_from_path(p: &Path) -> Option<retoc::version::EngineVersion> {
+    let s = p.to_string_lossy().to_lowercase();
+    let mut found = None;
+    for (tag, v) in [("4.27", "UE4_27"), ("5.0", "UE5_0"), ("ue50", "UE5_0"), ("5.1", "UE5_1"), ("5.2", "UE5_2"), ("5.3", "UE5_3"), ("5.4", "UE5_4"), ("5.5", "UE5_5"), ("5.6", "UE5_6"), ("5.7", "UE5_7"), ("5.8", "UE5_8"), ("g1r", "UE5_4")] {
+        if s.contains(tag) {
+            found = crate::legacy::parse_version(v).ok().flatten();
+        }
+    }
+    found
+}
+
+/// Extracts the `$legacy` files of the package at `shown` (+ its `.uexp` and bulk) into `dir`;
+/// returns their TC paths (as the copy would name them).
+fn extract_legacy(utoc: &Path, shown: &str, dir: &Path, opts: &Options) -> Vec<String> {
+    crate::legacy::reset();
+    let stem = shown.rsplit_once('.').unwrap().0.to_lowercase();
+    let mut arc = crate::read::open_archive(&utoc.with_extension("ucas"), opts, false).unwrap();
+    let mut out = Vec::new();
+    while let Some(h) = crate::read::next_header(&mut arc) {
+        let rel = h.name.strip_prefix("$legacy\\").map(String::from);
+        let wanted = rel.as_ref().is_some_and(|r| r.rsplit_once('.').is_some_and(|(s, _)| s.to_lowercase() == stem || s.to_lowercase() == format!("{stem}.m")));
+        if !wanted || h.attr & crate::ffi::FILE_ATTR_DIRECTORY != 0 {
+            assert_eq!(crate::read::process(&mut arc, crate::ffi::PK_SKIP, None), 0);
+            continue;
+        }
+        let rel = rel.unwrap();
+        crate::dialog::TEST_VERSION_ANSWERS.lock().unwrap().push((99, false, true));
+        let dest = dir.join(rel.replace('\\', "/"));
+        assert_eq!(crate::read::process(&mut arc, crate::ffi::PK_EXTRACT, Some(dest)), 0, "{rel}");
+        out.push(rel);
+    }
+    out
+}
+
+/// The engine's own legacy cook packed onto the engine's own Zen containers of the same cook
+/// (`IOSTORE_LEGACY_REF`: folders with `game/` = global + containers and `legacy/` = the
+/// `.uasset/.uexp` tree, e.g. the 5.8 Moadra sample's `.pak` contents): every package must come
+/// out byte-identical, with the same store entry.
+#[test]
+fn legacy_input_matches_the_engine_cook() {
+    let _l = lock();
+    let Some(root) = std::env::var_os("IOSTORE_LEGACY_REF").map(PathBuf::from) else {
+        return eprintln!("IOSTORE_LEGACY_REF not set: skipped");
+    };
+    let mut total = 0;
+    for set in std::fs::read_dir(&root).unwrap().flatten().map(|e| e.path()).filter(|p| p.join("game").is_dir()) {
+        let copy = copy_game(&set.join("game"), &format!("legacyref-{}", set.file_name().unwrap().to_string_lossy()));
+        let legacy = set.join("legacy");
+        let files: Vec<String> = walk(&legacy).into_iter().map(|p| p.strip_prefix(&legacy).unwrap().to_string_lossy().replace('/', "\\")).collect();
+        for t in targets(&copy) {
+            let before = snapshot(&t);
+            let shown: std::collections::HashSet<String> = extract_named_list(&t).into_iter().map(|s| s.to_lowercase()).collect();
+            let items: Vec<String> = files.iter().filter(|f| {
+                let l = f.to_lowercase();
+                shown.contains(&l) || l.strip_suffix(".uexp").is_some_and(|s| shown.contains(&format!("{s}.uasset")) || shown.contains(&format!("{s}.umap")))
+            }).cloned().collect();
+            if items.is_empty() {
+                continue;
+            }
+            let mut o = options(false);
+            o.pack.validate_on_replace = crate::config::ValidateOnReplace::Error;
+            let st = pack::pack_files(&t.with_extension("ucas"), None, &legacy, &items, pack::PK_PACK_SAVE_PATHS, &o).unwrap_or_else(|e| panic!("{}: {e:?}", t.display()));
+            let packages = items.iter().filter(|i| !i.to_lowercase().ends_with(".uexp")).count();
+            assert_eq!(st.replaced, packages, "{}", t.display());
+            let after = snapshot(&t);
+            // every chunk but the container header (rebuilt; its entries are compared below)
+            for (id, data) in &before.chunks {
+                if iostore::ChunkId(*id).kind(before.version) == ChunkKind::ContainerHeader {
+                    continue;
+                }
+                assert!(after.chunks.get(id) == Some(data), "{}: chunk {} differs from the engine's ({:?} bytes vs {})", t.display(), iostore::ChunkId(*id).hex(), after.chunks.get(id).map(|d| d.len()), data.len());
+            }
+            for id in before.chunks.keys() {
+                assert_eq!(entry_of(&before, *id).map(|e| format!("{e:?}")), entry_of(&after, *id).map(|e| format!("{e:?}")), "{}: store entry", t.display());
+            }
+            total += packages;
+        }
+        let _ = std::fs::remove_dir_all(&copy);
+    }
+    eprintln!("legacy reference: {total} packages identical to the engine's cook");
+    assert!(total > 0);
+}
+
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap().flatten() {
+        let p = e.path();
+        if p.is_dir() { out.extend(walk(&p)) } else { out.push(p) }
+    }
+    out
+}
+
+/// TC paths of a container's named files (Folder view).
+fn extract_named_list(utoc: &Path) -> Vec<String> {
+    let mut c = Container::open(utoc, Arc::new(Vanilla)).unwrap();
+    let idx = c.directory_index().unwrap().clone();
+    let prefix = Mount::parse(&idx.mount_point).display_prefix();
+    idx.files.iter().map(|f| if prefix.is_empty() { f.path.replace('/', "\\") } else { format!("{prefix}\\{}", f.path.replace('/', "\\")) }).collect()
+}
+
+/// Every sample game: a package's `$legacy` files packed back over it (replace) and, after deleting
+/// it, as a new file; the converted package keeps the game's name, exports and imports
+/// (ValidateOnReplace=Error passes), new packages work before 5.3 too; a `.uasset` alone is refused.
+#[test]
+fn legacy_round_trip_replaces_and_adds() {
+    let _l = lock();
+    let mut tested = 0;
+    for g in games() {
+        let Some(version) = version_from_path(&g) else { continue };
+        let Some(t0) = targets(&g).into_iter().find(|t| pick_package(t, false).is_some()) else { continue };
+        let copy = copy_game(&g, "legacyrt");
+        let utoc = copy.join(t0.file_name().unwrap());
+        let (shown, _key, id, _) = pick_package(&utoc, false).unwrap();
+        let before = snapshot(&utoc);
+        let orig_entry = entry_of(&before, id);
+        let mut o = options(false);
+        o.legacy_engine_version = Some(version);
+        o.pack.validate_on_replace = crate::config::ValidateOnReplace::Error;
+        let src = copy.join("legacy");
+        let items = extract_legacy(&utoc, &shown, &src, &o);
+        assert!(items.iter().any(|i| i.to_lowercase().ends_with(".uexp")), "{g:?}: {items:?}");
+        // imports `$legacy` couldn't resolve (packages outside the sample) became placeholders
+        let placeholder = crate::add::package_id("/Engine/UnknownPackage");
+        let sorted = |e: &retoc::container_header::StoreEntry| {
+            let mut v: Vec<u64> = e.imported_packages.iter().map(|p| p.0).collect();
+            v.sort();
+            v
+        };
+        // replace
+        confirm_answers(&[]);
+        let st = pack::pack_files(&utoc.with_extension("ucas"), None, &src, &items, pack::PK_PACK_SAVE_PATHS, &o).unwrap_or_else(|e| panic!("{g:?} replace: {e:?}"));
+        assert!(st.replaced >= 1, "{g:?}");
+        let after = snapshot(&utoc);
+        let e = entry_of(&after, id).unwrap_or_else(|| panic!("{g:?}: no entry"));
+        let resolvable = !e.imported_packages.iter().any(|p| p.0 == placeholder);
+        if let Some(o) = orig_entry.as_ref().filter(|_| resolvable) {
+            assert_eq!(sorted(&e), sorted(o), "{g:?}: imports after replace");
+            assert_eq!(e.shader_map_hashes, o.shader_map_hashes, "{g:?}: shader maps kept");
+        }
+        // new file (the game no longer has it)
+        pack::delete_files(&utoc.with_extension("ucas"), std::slice::from_ref(&shown), &o).unwrap();
+        confirm_answers(&[true]);
+        let st = pack::pack_files(&utoc.with_extension("ucas"), None, &src, &items, pack::PK_PACK_SAVE_PATHS, &o).unwrap_or_else(|e| panic!("{g:?} add: {e:?}"));
+        assert!(st.added >= 1, "{g:?}");
+        let q = asked();
+        assert!(q.len() == 1 && q[0].contains("New files ("), "{g:?}: {q:?}");
+        let after = snapshot(&utoc);
+        assert!(after.chunks.contains_key(&id), "{g:?}: same chunk id from the name inside");
+        let e = entry_of(&after, id).unwrap();
+        if let Some(o) = orig_entry.as_ref().filter(|_| resolvable) {
+            assert_eq!(sorted(&e), sorted(o), "{g:?}: imports of the new package");
+        }
+        // the .uasset alone
+        let lone = copy.join("lone");
+        let asset = items.iter().find(|i| !i.to_lowercase().ends_with(".uexp") && !i.to_lowercase().contains(".ubulk")).unwrap();
+        std::fs::create_dir_all(lone.join(Path::new(&asset.replace('\\', "/")).parent().unwrap())).unwrap();
+        std::fs::copy(src.join(asset.replace('\\', "/")), lone.join(asset.replace('\\', "/"))).unwrap();
+        let err = pack::pack_files(&utoc.with_extension("ucas"), None, &lone, std::slice::from_ref(asset), pack::PK_PACK_SAVE_PATHS, &o).unwrap_err();
+        let PackError::User(m) = err else { panic!("{err:?}") };
+        assert!(m.contains("without its .uexp"), "{m}");
+        tested += 1;
+        let _ = std::fs::remove_dir_all(&copy);
+    }
+    eprintln!("legacy round trip: {tested} games");
 }

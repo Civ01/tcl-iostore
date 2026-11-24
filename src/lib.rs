@@ -23,6 +23,7 @@ pub mod pack_settings;
 pub mod validate;
 pub mod source_stream;
 pub mod add;
+mod legacy_pack;
 pub mod profile;
 mod progress;
 pub mod read;
